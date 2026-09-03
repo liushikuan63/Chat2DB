@@ -54,6 +54,9 @@ export interface IImportOptions {
   maxErrors?: number;
 }
 
+/** Execution mode of bulk import/export tasks; absent resolves to STANDARD on the backend. */
+export type ImportExecutionMode = 'ULTRA_FAST' | 'STANDARD';
+
 export interface IImportColumnMatch {
   fileColumn: string;
   tableColumn?: string;

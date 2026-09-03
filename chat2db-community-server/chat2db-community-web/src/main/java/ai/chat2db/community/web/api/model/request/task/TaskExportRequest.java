@@ -40,4 +40,7 @@ public class TaskExportRequest extends DataSourceBaseRequest {
      * Optional rows-per-checkpoint interval enabling resumable exports.
      */
     private Integer checkpointRows;
+
+    /** Execution mode: ULTRA_FAST or STANDARD (default when absent). */
+    private String mode;
 }

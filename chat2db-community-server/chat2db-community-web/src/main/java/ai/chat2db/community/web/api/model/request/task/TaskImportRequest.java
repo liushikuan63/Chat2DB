@@ -22,4 +22,7 @@ public class TaskImportRequest extends DataSourceBaseRequest {
     private String dataTimeFormat;
 
     private ImportOptions options;
+
+    /** Execution mode: ULTRA_FAST or STANDARD (default when absent). */
+    private String mode;
 }

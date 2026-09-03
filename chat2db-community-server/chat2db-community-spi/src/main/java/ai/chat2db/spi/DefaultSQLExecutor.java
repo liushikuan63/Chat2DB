@@ -31,6 +31,7 @@ import ai.chat2db.community.domain.api.service.db.ISqlExecutionResultConsumer;
 import ai.chat2db.community.domain.api.service.db.ISqlExecutionStatementListener;
 import ai.chat2db.spi.sql.Chat2DBContext;
 import ai.chat2db.spi.util.JdbcUtils;
+import ai.chat2db.spi.util.MultiRowInsertSql;
 import ai.chat2db.spi.util.ResultSetUtils;
 import ai.chat2db.spi.util.SqlUtils;
 import com.alibaba.druid.DbType;
@@ -1742,6 +1743,16 @@ public class DefaultSQLExecutor implements ICommandExecutor {
     public void executeBatchInsert(Connection connection, List<String> sqlCacheList,
                                    ISqlExecutionStatementListener statementListener,
                                    Runnable cancellationChecker) {
+        executeBatchInsert(connection, sqlCacheList, statementListener, cancellationChecker, true);
+    }
+
+    /**
+     * @param mergeRowInserts when {@code false} (standard mode) the statements are executed exactly
+     *                        as delivered, one per JDBC batch entry, with no multi-row collapsing
+     */
+    public void executeBatchInsert(Connection connection, List<String> sqlCacheList,
+                                   ISqlExecutionStatementListener statementListener,
+                                   Runnable cancellationChecker, boolean mergeRowInserts) {
         if (sqlCacheList == null || sqlCacheList.isEmpty()) {
             return;
         }
@@ -1757,7 +1768,7 @@ public class DefaultSQLExecutor implements ICommandExecutor {
                 checkTaskCancellation(cancellationChecker);
                 List<String> chunk = sqlCacheList.subList(start,
                         Math.min(sqlCacheList.size(), start + BATCH_INSERT_CHUNK_SIZE));
-                executeInsertChunk(connection, chunk, statementListener, cancellationChecker);
+                executeInsertChunk(connection, chunk, statementListener, cancellationChecker, mergeRowInserts);
                 connection.commit();
             }
         } catch (SQLException e) {
@@ -1777,7 +1788,10 @@ public class DefaultSQLExecutor implements ICommandExecutor {
 
     private void executeInsertChunk(Connection connection, List<String> chunk,
                                     ISqlExecutionStatementListener statementListener,
-                                    Runnable cancellationChecker) throws SQLException {
+                                    Runnable cancellationChecker, boolean mergeRowInserts) throws SQLException {
+        if (mergeRowInserts && tryExecuteMergedInsertChunk(connection, chunk, statementListener, cancellationChecker)) {
+            return;
+        }
         try (Statement statement = connection.createStatement()) {
             notifyStatementCreated(statementListener, statement);
             try {
@@ -1790,6 +1804,51 @@ public class DefaultSQLExecutor implements ICommandExecutor {
                 notifyStatementClosed(statementListener, statement);
             }
         }
+    }
+
+    /**
+     * Fast path: collapses runs of single-row INSERTs into multi-row
+     * {@code INSERT ... VALUES (...),(...)} statements for dialects that support them, turning
+     * one round trip per row into one per few thousand rows. Any problem — an unknown or hostile
+     * dialect, a statement with an unexpected shape, or the server rejecting the merged batch —
+     * rolls the chunk transaction back and returns {@code false} so the caller replays the exact
+     * legacy one-statement-per-row path above: the merged form is an optimization only and can
+     * never change what data lands.
+     */
+    private boolean tryExecuteMergedInsertChunk(Connection connection, List<String> chunk,
+            ISqlExecutionStatementListener statementListener, Runnable cancellationChecker)
+            throws SQLException {
+        List<String> merged;
+        try {
+            merged = MultiRowInsertSql.mergeForCurrentDialect(chunk);
+        } catch (Throwable mergeFailure) {
+            log.warn("Multi-row INSERT merge failed; using the legacy one-row-per-statement batch",
+                    mergeFailure);
+            return false;
+        }
+        if (merged == null) {
+            return false;
+        }
+        try (Statement statement = connection.createStatement()) {
+            notifyStatementCreated(statementListener, statement);
+            try {
+                for (String sql : merged) {
+                    checkTaskCancellation(cancellationChecker);
+                    statement.addBatch(sql);
+                }
+                statement.executeBatch();
+            } finally {
+                notifyStatementClosed(statementListener, statement);
+            }
+        } catch (SQLException mergedFailure) {
+            // Undo the partial merged attempt (previous chunks are already committed); the legacy
+            // path then re-applies this chunk exactly once, so no row is lost or duplicated.
+            rollbackQuietly(connection);
+            log.warn("Multi-row INSERT batch rejected by the target; replaying the chunk on the "
+                    + "legacy one-row-per-statement path", mergedFailure);
+            return false;
+        }
+        return true;
     }
 
     private void rollbackQuietly(Connection connection) {

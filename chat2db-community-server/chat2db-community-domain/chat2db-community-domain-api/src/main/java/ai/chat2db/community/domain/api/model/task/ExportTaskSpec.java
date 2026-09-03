@@ -51,4 +51,9 @@ public class ExportTaskSpec implements TaskSpec {
      * single-statement streaming path.
      */
     private Integer checkpointRows;
+
+    /**
+     * Execution mode, see {@link TaskExecutionMode}; {@code null} resolves to {@code STANDARD}.
+     */
+    private String mode;
 }

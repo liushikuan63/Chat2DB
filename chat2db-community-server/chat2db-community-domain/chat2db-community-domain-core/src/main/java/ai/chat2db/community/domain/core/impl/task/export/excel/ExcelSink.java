@@ -94,6 +94,15 @@ final class ExcelSink implements FormatSink {
         return counting.bytesWritten();
     }
 
+    /**
+     * Best-effort push of EasyExcel's buffers; the workbook is only complete after {@link #close()},
+     * but Excel formats never carry checkpoints, so this only serves progress reporting.
+     */
+    @Override
+    public void flush() throws IOException {
+        counting.flush();
+    }
+
     @Override
     public void close() {
         excelWriter.finish();

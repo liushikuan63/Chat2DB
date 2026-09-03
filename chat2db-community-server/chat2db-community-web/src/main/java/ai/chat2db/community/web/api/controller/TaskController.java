@@ -67,7 +67,7 @@ public class TaskController {
     }
 
     @PostMapping("/resume")
-    public DataResult<TaskSubmitResponse> resume(@Valid TaskIdRequest request) {
+    public DataResult<TaskSubmitResponse> resume(@RequestBody @Valid TaskIdRequest request) {
         return DataResult.of(new TaskSubmitResponse(taskService.resume(request.getTaskId())));
     }
 

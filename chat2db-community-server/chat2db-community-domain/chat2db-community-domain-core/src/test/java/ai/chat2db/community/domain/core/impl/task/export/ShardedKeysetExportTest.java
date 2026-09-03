@@ -9,6 +9,7 @@ import ai.chat2db.community.domain.api.service.task.TaskCancelable;
 import ai.chat2db.community.domain.api.service.task.TaskExecutionContext;
 import ai.chat2db.community.domain.core.impl.db.extension.SqlExecutionPolicyManager;
 import ai.chat2db.community.domain.core.impl.task.export.sink.CsvSink;
+import ai.chat2db.community.domain.core.impl.task.export.sink.SqlSink;
 import ai.chat2db.community.tools.constant.JdbcDriverConstants;
 import ai.chat2db.spi.DefaultMetaService;
 import ai.chat2db.spi.IDbMetaData;
@@ -46,6 +47,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * Parallel keyset shards must still produce one artifact in strict key order: workers fill
  * per-shard queues and the caller drains them shard by shard into the single sink. Each worker
  * opens its own JDBC connection through the standard driver manager, like production shards do.
+ * The standard mode runs the same table through the serial path and must not spin up shards.
  */
 class ShardedKeysetExportTest {
 
@@ -125,7 +127,7 @@ class ShardedKeysetExportTest {
         setShardMaxParallelism(exporter, 3);
         ByteArrayOutputStream out = new ByteArrayOutputStream();
 
-        String csv = runThroughPipeline(exporter, context, out);
+        String csv = runThroughPipeline(exporter, context, out, "ULTRA_FAST");
         List<String> lines = new java.util.ArrayList<>(java.util.Arrays.asList(
                 csv.replace("﻿", "").split("\r\n")));
         assertEquals("ID,NAME", lines.get(0));
@@ -139,9 +141,64 @@ class ShardedKeysetExportTest {
                 "expected several shard threads, saw " + context.workerThreads);
     }
 
+    /**
+     * Standard mode must keep the export on the single-cursor serial path: ordered artifact, no
+     * shard workers, regardless of the configured fan-out.
+     */
+    @Test
+    void standardModeFallsBackToTheSerialPath() throws Exception {
+        RecordingContext context = new RecordingContext();
+        ShardTestExporter exporter = new ShardTestExporter();
+        setShardMaxParallelism(exporter, 3);
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+
+        String csv = runThroughPipeline(exporter, context, out, "STANDARD");
+        List<String> lines = new java.util.ArrayList<>(java.util.Arrays.asList(
+                csv.replace("﻿", "").split("\r\n")));
+        assertEquals("ID,NAME", lines.get(0));
+        assertEquals(ROWS, lines.size() - 1);
+        assertEquals(0, context.workerThreads.stream()
+                        .filter(name -> name.startsWith("chat2db-shard-")).count(),
+                "standard mode must not spin up shard workers, saw " + context.workerThreads);
+    }
+
+    /**
+     * SQL dumps shard too: rows become dialect literals on the shard threads and the ordered
+     * drain must keep the multi-value INSERT statements in key order.
+     */
+    @Test
+    void shardsDrainInKeyOrderThroughSqlSink() throws Exception {
+        RecordingContext context = new RecordingContext();
+        SqlShardTestExporter exporter = new SqlShardTestExporter();
+        setShardMaxParallelism(exporter, 3);
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+
+        exporter.exportDirect(context, out, "ULTRA_FAST");
+        String dump = out.toString(StandardCharsets.UTF_8);
+        assertTrue(dump.startsWith("INSERT"), dump.substring(0, Math.min(80, dump.length())));
+        String[] statements = dump.split(";\n");
+        assertTrue(statements.length > 1 && statements.length <= ROWS / 10,
+                "rows must merge into multi-value statements, saw " + statements.length
+                        + " statements for " + ROWS + " rows");
+        // Values arrive as dialect literals, so the numeric key may be quoted ('1'); the regex
+        // tolerates both bare and quoted integers as long as tuples stay in key order.
+        Matcher ids = Pattern.compile("\\(('?)(\\d+)\\1\\s*,").matcher(dump);
+        long expected = 1;
+        int tuples = 0;
+        while (ids.find()) {
+            assertEquals(expected, Long.parseLong(ids.group(2)), "statements must stay in key order");
+            expected++;
+            tuples++;
+        }
+        assertEquals(ROWS, tuples, "every row must appear exactly once, dump sample: "
+                + dump.substring(0, Math.min(300, dump.length())));
+        assertTrue(context.workerThreads.size() >= 2,
+                "expected several shard threads, saw " + context.workerThreads);
+    }
+
     private String runThroughPipeline(ShardTestExporter exporter, RecordingContext context,
-            ByteArrayOutputStream out) throws Exception {
-        exporter.exportDirect(context, out);
+            ByteArrayOutputStream out, String mode) throws Exception {
+        exporter.exportDirect(context, out, mode);
         return out.toString(StandardCharsets.UTF_8);
     }
 
@@ -172,10 +229,45 @@ class ShardedKeysetExportTest {
                     new ExportProgressLogger(context, "CSV", tableName), resuming);
         }
 
-        private void exportDirect(RecordingContext context, java.io.ByteArrayOutputStream out) throws Exception {
+        private void exportDirect(RecordingContext context, java.io.ByteArrayOutputStream out,
+                String mode) throws Exception {
             ExportTaskSpec spec = ExportTaskSpec.builder()
                     .tableNames(List.of("SHARD_ITEMS"))
                     .target(TaskTargetSnapshot.builder().dataSourceId(1L).tableName("SHARD_ITEMS").build())
+                    .mode(mode)
+                    .build();
+            singleExport(spec, context, "SHARD_ITEMS", out, false);
+        }
+    }
+
+    private static final class SqlShardTestExporter extends BaseExporter {
+
+        private SqlShardTestExporter() {
+            super(new ExportCellProcessorChain(List.of()), new SqlExecutionPolicyManager(List.of()));
+            this.suffix = ".sql";
+        }
+
+        @Override
+        public String type() {
+            return "sql";
+        }
+
+        @Override
+        protected void singleExport(ExportTaskSpec spec, TaskExecutionContext context, String tableName,
+                java.io.OutputStream output, boolean resuming) {
+            streamTable(spec, tableName, context, output,
+                    (stream, effectiveSpec, effectiveTable, resume) -> new SqlSink(stream,
+                            Chat2DBContext.getSqlBuilder(), null, null),
+                    ExportValueMode.SQL_LITERAL, 1000,
+                    new ExportProgressLogger(context, "SQL", tableName), resuming);
+        }
+
+        private void exportDirect(RecordingContext context, java.io.ByteArrayOutputStream out,
+                String mode) throws Exception {
+            ExportTaskSpec spec = ExportTaskSpec.builder()
+                    .tableNames(List.of("SHARD_ITEMS"))
+                    .target(TaskTargetSnapshot.builder().dataSourceId(1L).tableName("SHARD_ITEMS").build())
+                    .mode(mode)
                     .build();
             singleExport(spec, context, "SHARD_ITEMS", out, false);
         }
@@ -189,6 +281,15 @@ class ShardedKeysetExportTest {
         @Override
         public Long taskId() {
             return 42L;
+        }
+
+        @Override
+        public void checkpoint(ai.chat2db.community.domain.api.model.task.ResumeState state) {
+        }
+
+        @Override
+        public List<ai.chat2db.community.domain.api.model.task.ResumeState> resumeStates() {
+            return List.of();
         }
 
         @Override

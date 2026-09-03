@@ -20,10 +20,21 @@ public final class ImportSqlExecutor {
 
     private final TaskExecutionContext context;
 
+    private final boolean mergeRowInserts;
+
     private final AtomicInteger batchSequence = new AtomicInteger();
 
     public ImportSqlExecutor(TaskExecutionContext context) {
+        this(context, true);
+    }
+
+    /**
+     * @param mergeRowInserts when {@code false} (standard mode) consecutive single-row INSERTs are
+     *                        never collapsed into multi-row statements
+     */
+    public ImportSqlExecutor(TaskExecutionContext context, boolean mergeRowInserts) {
         this.context = context;
+        this.mergeRowInserts = mergeRowInserts;
     }
 
     public void executeBatch(List<String> sqls) {
@@ -82,7 +93,8 @@ public final class ImportSqlExecutor {
         }
         context.checkCancelled();
         DefaultSQLExecutor.getInstance().executeBatchInsert(
-                Chat2DBContext.getConnection(), List.copyOf(inserts), context, context::checkCancelled);
+                Chat2DBContext.getConnection(), List.copyOf(inserts), context, context::checkCancelled,
+                mergeRowInserts);
         inserts.clear();
     }
 

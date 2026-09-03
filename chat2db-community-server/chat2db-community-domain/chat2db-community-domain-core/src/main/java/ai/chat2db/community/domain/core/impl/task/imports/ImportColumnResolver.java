@@ -97,7 +97,19 @@ public final class ImportColumnResolver {
         }
     }
 
+    /**
+     * Case-insensitive match on trimmed names, ignoring a leading UTF-8 BOM: commons-csv does not
+     * strip it, and without this the first column of every BOM-prefixed file (including files
+     * written by our own CsvSink) would never match.
+     */
     private static String normalize(String name) {
-        return name == null ? "" : name.trim().toLowerCase(java.util.Locale.ROOT);
+        if (name == null) {
+            return "";
+        }
+        String trimmed = name;
+        if (!trimmed.isEmpty() && trimmed.charAt(0) == '\ufeff') {
+            trimmed = trimmed.substring(1);
+        }
+        return trimmed.trim().toLowerCase(java.util.Locale.ROOT);
     }
 }

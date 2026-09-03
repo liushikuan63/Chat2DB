@@ -1,13 +1,13 @@
 import { memo, useMemo, useState, forwardRef, ForwardedRef, useImperativeHandle, useEffect } from 'react';
 import { useStyles } from './style';
 import UploadLocalFile from '@/components/UploadLocalFile';
-import { Form, Input, Select, InputNumber } from 'antd';
+import { Form, Input, Select, InputNumber, Switch, Checkbox, Modal } from 'antd';
 import i18n from '@/i18n';
 import { useImportExportStore } from '@/store/importExport';
 import { IconButton } from '@chat2db/ui';
 import { ImportExportType, ImportExportFileType, ImportExportTaskType } from '@/constants/importExport';
-import { ExportTaskParams, ImportTaskParams } from '@/service/importExport';
-import { IImportOptions } from '@/typings/importExport';
+import importExportServices, { ExportTaskParams, ImportTaskParams } from '@/service/importExport';
+import { IImportOptions, IImportPreview, IImportColumnMapping, ImportExecutionMode } from '@/typings/importExport';
 import { isDesktop, isDevelopment } from '@/utils/env';
 import jcefApi from '@/jcef';
 
@@ -65,10 +65,15 @@ const ImportExportFile = forwardRef((props: IProps, ref: ForwardedRef<ImportExpo
   const [form] = Form.useForm();
   const [fileUrlList, setFileUrlList] = useState<string[]>([]);
   const [exportLocation, setExportLocation] = useState<string>('');
+  const [importPreview, setImportPreview] = useState<IImportPreview | null>(null);
+  const [columnMappings, setColumnMappings] = useState<Record<string, string | undefined>>({});
   const [formValue, setFormValue] = useState<ImportExportFormValue>({
     exportType: ImportExportFileType.CSV,
     containsHeader: true,
   });
+  const [mode, setMode] = useState<ImportExecutionMode>('STANDARD');
+  const [riskAcknowledged, setRiskAcknowledged] = useState(false);
+  const [modeConfirmOpen, setModeConfirmOpen] = useState(false);
 
   const { importExportDataBoundInfo } = useImportExportStore((state) => {
     return {
@@ -101,6 +106,57 @@ const ImportExportFile = forwardRef((props: IProps, ref: ForwardedRef<ImportExpo
     }
   }, [fileUrlList, formValue]);
 
+  // Previews the selected import file once both the file and the format are known, so the
+  // column mapping panel below reflects what the backend will actually import.
+  const importSourceFile = fileUrlList[0] || formValue.fileUrl || '';
+  const previewableFormat =
+    isImport && importSourceFile && formValue.exportType !== ImportExportFileType.SQL;
+  useEffect(() => {
+    if (!previewableFormat || !importExportDataBoundInfo) {
+      setImportPreview(null);
+      return () => {};
+    }
+    let cancelled = false;
+    const { dataSourceId, databaseName, schemaName, tableName } = importExportDataBoundInfo;
+    importExportServices
+      .previewImport({
+        dataSourceId,
+        databaseName,
+        schemaName,
+        taskType: ImportExportTaskType.DATA_FILE_IMPORT,
+        format: formValue.exportType,
+        tableName,
+        sourceFile: importSourceFile,
+      })
+      .then((preview) => {
+        if (cancelled) return;
+        setImportPreview(preview);
+        const initial: Record<string, string | undefined> = {};
+        preview.columnMatches.forEach((match) => {
+          initial[match.fileColumn] = match.matched ? match.tableColumn : undefined;
+        });
+        setColumnMappings(initial);
+      })
+      .catch(() => {
+        if (!cancelled) setImportPreview(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [previewableFormat, importSourceFile, formValue.exportType, importExportDataBoundInfo]);
+
+  const targetColumnOptions = useMemo(() => {
+    if (!importPreview) return [];
+    const names = new Set<string>();
+    importPreview.columnMatches.forEach((match) => {
+      if (match.tableColumn) names.add(match.tableColumn);
+    });
+    importPreview.missingTableColumns.forEach((name) => names.add(name));
+    return Array.from(names)
+      .sort()
+      .map((name) => ({ label: name, value: name }));
+  }, [importPreview]);
+
   useEffect(() => {
     if (isExport) {
       setIsReady?.(!isDesktop || !!exportLocation || !!formValue.fileUrl);
@@ -120,6 +176,7 @@ const ImportExportFile = forwardRef((props: IProps, ref: ForwardedRef<ImportExpo
         databaseName,
         schemaName,
         format: formValue.exportType,
+        mode,
       };
       if (isExport) {
         return {
@@ -132,18 +189,28 @@ const ImportExportFile = forwardRef((props: IProps, ref: ForwardedRef<ImportExpo
           checkpointRows: formValue.checkpointRows || undefined,
         };
       }
+      const mappingList: IImportColumnMapping[] | undefined = importPreview
+        ? Object.entries(columnMappings)
+            .filter((entry) => !!entry[1])
+            .map(([source, target]) => ({ source, target: target as string }))
+        : undefined;
       const options: IImportOptions | undefined =
-        formValue.exportType === ImportExportFileType.CSV
-          ? {
-              charset: formValue.charset || undefined,
-              delimiter: formValue.delimiter || undefined,
-              quoteChar: formValue.quoteChar || undefined,
-              skipRows: formValue.skipRows || undefined,
-              nullString: formValue.nullString || undefined,
-              onError: formValue.onError || undefined,
-              maxErrors: formValue.onError === 'SKIP' ? formValue.maxErrors || undefined : undefined,
-            }
-          : undefined;
+        formValue.exportType === ImportExportFileType.SQL
+          ? undefined
+          : {
+              ...(formValue.exportType === ImportExportFileType.CSV
+                ? {
+                    charset: formValue.charset || undefined,
+                    delimiter: formValue.delimiter || undefined,
+                    quoteChar: formValue.quoteChar || undefined,
+                    skipRows: formValue.skipRows || undefined,
+                    nullString: formValue.nullString || undefined,
+                    onError: formValue.onError || undefined,
+                    maxErrors: formValue.onError === 'SKIP' ? formValue.maxErrors || undefined : undefined,
+                  }
+                : {}),
+              ...(mappingList?.length ? { columnMappings: mappingList } : {}),
+            };
       return {
         ...commonValues,
         taskType:
@@ -168,6 +235,16 @@ const ImportExportFile = forwardRef((props: IProps, ref: ForwardedRef<ImportExpo
     const fileName = await jcefApi?.selectDirectory();
     if (!fileName) return;
     setExportLocation(fileName);
+  };
+
+  // The first enable asks for an explicit risk acknowledgement; once acknowledged in this
+  // session the switch toggles freely between the two modes.
+  const handleModeToggle = (checked: boolean) => {
+    if (checked && !riskAcknowledged) {
+      setModeConfirmOpen(true);
+      return;
+    }
+    setMode(checked ? 'ULTRA_FAST' : 'STANDARD');
   };
 
   return (
@@ -263,11 +340,91 @@ const ImportExportFile = forwardRef((props: IProps, ref: ForwardedRef<ImportExpo
           )}
         </>
       )}
+      {isImport && importPreview && (
+        <div className={styles.previewPanel}>
+          <div className={styles.previewTitle}>{i18n('workspace.importExport.preview.columnMapping')}</div>
+          {(importPreview.detectedCharset || importPreview.detectedDelimiter) && (
+            <div className={styles.previewMeta}>
+              {importPreview.detectedCharset && (
+                <span>
+                  {i18n('workspace.importExport.charset')}: {importPreview.detectedCharset}
+                </span>
+              )}
+              {importPreview.detectedDelimiter && (
+                <span>
+                  {i18n('workspace.importExport.delimiter')}: {importPreview.detectedDelimiter}
+                </span>
+              )}
+            </div>
+          )}
+          {importPreview.columnMatches.map((match) => (
+            <div key={match.fileColumn} className={styles.previewRow}>
+              <span className={styles.previewFileColumn} title={match.fileColumn}>
+                {match.fileColumn}
+              </span>
+              <Select
+                allowClear
+                size="small"
+                placeholder={i18n('workspace.importExport.preview.ignore')}
+                value={columnMappings[match.fileColumn]}
+                options={targetColumnOptions}
+                onChange={(value) =>
+                  setColumnMappings((previous) => ({ ...previous, [match.fileColumn]: value }))
+                }
+              />
+            </div>
+          ))}
+          {importPreview.missingTableColumns.length > 0 && (
+            <div className={styles.previewWarning}>
+              {i18n('workspace.importExport.preview.unmatchedColumns')}:{' '}
+              {importPreview.missingTableColumns.join(', ')}
+            </div>
+          )}
+        </div>
+      )}
       {isDevelopment && (
         <Form.Item label="File URL" name="fileUrl">
           <Input autoComplete="off" />
         </Form.Item>
       )}
+      <Form.Item
+        label={i18n('workspace.importExport.ultraMode')}
+        extra={i18n('workspace.importExport.ultraModeHint')}
+      >
+        <Switch checked={mode === 'ULTRA_FAST'} onChange={handleModeToggle} />
+      </Form.Item>
+      <div className={styles.modeIndicator}>
+        {mode === 'ULTRA_FAST'
+          ? i18n('workspace.importExport.modeBadgeUltra')
+          : i18n('workspace.importExport.modeBadgeStandard')}
+      </div>
+      <Modal
+        title={i18n('workspace.importExport.ultraModeConfirmTitle')}
+        open={modeConfirmOpen}
+        okText={i18n('workspace.importExport.ultraModeConfirm')}
+        cancelText={i18n('workspace.importExport.off')}
+        okButtonProps={{ disabled: !riskAcknowledged }}
+        onOk={() => {
+          setRiskAcknowledged(true);
+          setMode('ULTRA_FAST');
+          setModeConfirmOpen(false);
+        }}
+        onCancel={() => setModeConfirmOpen(false)}
+        width={560}
+      >
+        <div>{i18n('workspace.importExport.ultraModeConfirmIntro')}</div>
+        <ul>
+          <li>{i18n('workspace.importExport.ultraModeBenefit1')}</li>
+          <li>{i18n('workspace.importExport.ultraModeBenefit2')}</li>
+          <li>{i18n('workspace.importExport.ultraModeBenefit3')}</li>
+          <li>{i18n('workspace.importExport.ultraModeRisk1')}</li>
+          <li>{i18n('workspace.importExport.ultraModeRisk2')}</li>
+          <li>{i18n('workspace.importExport.ultraModeRisk3')}</li>
+        </ul>
+        <Checkbox checked={riskAcknowledged} onChange={(e) => setRiskAcknowledged(e.target.checked)}>
+          {i18n('workspace.importExport.ultraModeAcknowledge')}
+        </Checkbox>
+      </Modal>
       {/* <Form.Item name="containsHeader" valuePropName="checked">
         <Checkbox>{i18n('workspace.importExport.containsHeader')}</Checkbox>
       </Form.Item> */}

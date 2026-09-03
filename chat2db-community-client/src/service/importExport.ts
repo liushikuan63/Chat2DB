@@ -66,6 +66,8 @@ export interface ExportTaskParams extends IDatabaseBaseInfo {
   suggestedFileName?: string;
   compression?: string;
   checkpointRows?: number;
+  /** Execution mode: ULTRA_FAST (parallel) or STANDARD (serial). Default STANDARD. */
+  mode?: 'ULTRA_FAST' | 'STANDARD';
 }
 
 export interface ImportTaskParams extends IDatabaseBaseInfo {
@@ -77,6 +79,8 @@ export interface ImportTaskParams extends IDatabaseBaseInfo {
   format: ImportExportFileType;
   dataTimeFormat?: string;
   options?: IImportOptions;
+  /** Execution mode: ULTRA_FAST (parallel) or STANDARD (serial). Default STANDARD. */
+  mode?: 'ULTRA_FAST' | 'STANDARD';
 }
 
 const submitExport = createRequest<ExportTaskParams, TaskSubmissionResponse>('/api/tasks/export', { method: 'post' });

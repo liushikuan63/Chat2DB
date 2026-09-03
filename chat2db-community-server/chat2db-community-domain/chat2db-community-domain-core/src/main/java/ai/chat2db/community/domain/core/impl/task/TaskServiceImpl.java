@@ -50,6 +50,9 @@ public class TaskServiceImpl implements TaskService {
 
     private final Striped<Lock> deletionLocks = Striped.lazyWeakLock(64);
 
+    @org.springframework.beans.factory.annotation.Value("${chat2db.task.import.allowed-roots:}")
+    private String importAllowedRoots;
+
     private final TaskStorage taskStorage;
 
     private final LocalTaskManager localTaskManager;
@@ -69,11 +72,13 @@ public class TaskServiceImpl implements TaskService {
 
     @Override
     public Long submitImport(ImportTaskSpec spec) {
+        validateImportSource(spec.getSourceFile());
         return submit(spec);
     }
 
     @Override
     public ImportPreview previewImport(ImportTaskSpec spec) {
+        validateImportSource(spec.getSourceFile());
         java.io.File source = new java.io.File(StringUtils.defaultString(spec.getSourceFile()));
         if (!source.isFile() || !source.canRead()) {
             throw new BusinessException("task.import.preview.sourceUnreadable", null);
@@ -153,8 +158,40 @@ public class TaskServiceImpl implements TaskService {
         localTaskManager.validate(spec);
         Context context = ContextUtils.queryContext();
         ConnectInfo connectInfo = Chat2DBContext.getConnectInfo();
-        localTaskManager.resume(task, spec, context, connectInfo);
+        try {
+            localTaskManager.resume(task, spec, context, connectInfo);
+        } catch (IllegalStateException | java.util.concurrent.RejectedExecutionException race) {
+            // A double resume or an exit-in-progress race must surface as a client error, not a 500.
+            throw new BusinessException("task.resume.conflict", null, race);
+        }
         return taskId;
+    }
+
+    /**
+     * Server deployments can restrict which directories import files may come from; desktop runs
+     * keep the unrestricted default. Paths are compared normalized and absolute so `..` segments
+     * cannot escape the allowlist.
+     */
+    private void validateImportSource(String sourceFile) {
+        if (StringUtils.isBlank(importAllowedRoots) || StringUtils.isBlank(sourceFile)) {
+            return;
+        }
+        java.nio.file.Path candidate;
+        try {
+            candidate = java.nio.file.Path.of(sourceFile).toAbsolutePath().normalize();
+        } catch (java.nio.file.InvalidPathException invalidPath) {
+            throw new BusinessException("task.import.sourceNotAllowed", null);
+        }
+        for (String root : importAllowedRoots.split(",")) {
+            if (StringUtils.isBlank(root)) {
+                continue;
+            }
+            java.nio.file.Path allowedRoot = java.nio.file.Path.of(root.trim()).toAbsolutePath().normalize();
+            if (candidate.startsWith(allowedRoot)) {
+                return;
+            }
+        }
+        throw new BusinessException("task.import.sourceNotAllowed", null);
     }
 
     private TaskSpec parseSpec(Task task) {

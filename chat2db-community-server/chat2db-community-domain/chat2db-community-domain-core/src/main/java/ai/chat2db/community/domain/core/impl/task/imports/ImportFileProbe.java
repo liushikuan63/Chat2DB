@@ -36,7 +36,17 @@ public final class ImportFileProbe {
     }
 
     public static Charset effectiveCharset(File file, String requested) {
-        return StringUtils.isBlank(requested) ? detectCharset(file) : Charset.forName(requested.trim());
+        if (StringUtils.isBlank(requested)) {
+            return detectCharset(file);
+        }
+        try {
+            return Charset.forName(requested.trim());
+        } catch (RuntimeException unsupportedCharset) {
+            // IllegalArgumentException for unknown names, IllegalCharsetNameException/"
+            // UnsupportedCharsetException otherwise; both are caller input errors.
+            throw new ai.chat2db.community.tools.exception.ParamBusinessException(
+                    "Invalid import charset: " + requested);
+        }
     }
 
     /**

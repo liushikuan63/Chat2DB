@@ -34,6 +34,15 @@ abstract class TextSink implements FormatSink {
         return counting.bytesWritten();
     }
 
+    /**
+     * The counting stream is unbuffered, so flushing the writer also drains every byte the sink
+     * has produced; {@code bytesWritten()} then matches the artifact file length.
+     */
+    @Override
+    public void flush() throws IOException {
+        writer.flush();
+    }
+
     @Override
     public void close() throws IOException {
         writer.flush();

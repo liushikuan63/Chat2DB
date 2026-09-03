@@ -32,4 +32,13 @@ public interface FormatSink extends Closeable {
      * Bytes produced so far, used for size limits and progress.
      */
     long bytesWritten();
+
+    /**
+     * Pushes every buffered byte down to the caller-owned output stream without closing anything.
+     * After this returns, the bytes reported by {@link #bytesWritten()} are durable in the artifact
+     * file, which is the invariant the checkpointed export path relies on before persisting a
+     * resume cursor.
+     */
+    default void flush() throws java.io.IOException {
+    }
 }

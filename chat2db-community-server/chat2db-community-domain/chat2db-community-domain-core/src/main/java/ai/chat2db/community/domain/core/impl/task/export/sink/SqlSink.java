@@ -92,25 +92,29 @@ public final class SqlSink extends TextSink {
         flush();
     }
 
+    /**
+     * Emits the pending multi-value statement, then drains the writer so the bytes already counted
+     * are on disk before a checkpoint is taken.
+     */
+    @Override
+    public void flush() throws IOException {
+        if (!pendingRows.isEmpty()) {
+            write(sqlBuilder.dml().buildBatchInsert(MultiInsertSqlRequest.builder()
+                    .databaseName(StringUtils.trimToNull(databaseName))
+                    .schemaName(StringUtils.trimToNull(schemaName))
+                    .tableName(tableName)
+                    .columnList(List.copyOf(columnNames))
+                    .valueLists(List.copyOf(pendingRows))
+                    .build()));
+            write(";\n");
+            pendingRows.clear();
+            pendingBytes = 0;
+        }
+        super.flush();
+    }
+
     @Override
     public void close() throws IOException {
         flush();
-        super.close();
-    }
-
-    private void flush() throws IOException {
-        if (pendingRows.isEmpty()) {
-            return;
-        }
-        write(sqlBuilder.dml().buildBatchInsert(MultiInsertSqlRequest.builder()
-                .databaseName(StringUtils.trimToNull(databaseName))
-                .schemaName(StringUtils.trimToNull(schemaName))
-                .tableName(tableName)
-                .columnList(List.copyOf(columnNames))
-                .valueLists(List.copyOf(pendingRows))
-                .build()));
-        write(";\n");
-        pendingRows.clear();
-        pendingBytes = 0;
     }
 }
