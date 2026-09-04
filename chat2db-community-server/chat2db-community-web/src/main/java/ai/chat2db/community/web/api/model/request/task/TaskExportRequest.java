@@ -24,6 +24,8 @@ public class TaskExportRequest extends DataSourceBaseRequest {
 
     private String format;
 
+    private String compression;
+
     private String scope;
 
     private Boolean containData;
@@ -33,4 +35,12 @@ public class TaskExportRequest extends DataSourceBaseRequest {
     private String exportPath;
 
     private String suggestedFileName;
+
+    /**
+     * Optional rows-per-checkpoint interval enabling resumable exports.
+     */
+    private Integer checkpointRows;
+
+    /** Execution mode: ULTRA_FAST or STANDARD (default when absent). */
+    private String mode;
 }
