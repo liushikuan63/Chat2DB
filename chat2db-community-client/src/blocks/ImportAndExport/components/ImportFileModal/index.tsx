@@ -31,6 +31,7 @@ export default memo<IProps>((_props) => {
   });
 
   useEffect(() => {
+    setIsReady(false);
     if (!importExportDataBoundInfo) {
       setTaskId(undefined);
       setTaskDetails(undefined);
@@ -108,16 +109,27 @@ export default memo<IProps>((_props) => {
     setTaskDetails(_taskDetails);
   };
 
+  const modalTitle = (() => {
+    if (importExportDataBoundInfo?.type === ImportExportType.IMPORT) {
+      return importExportDataBoundInfo.targetScope === 'TABLE'
+        ? i18n('workspace.menu.importData')
+        : i18n('workspace.menu.runSqlFile');
+    }
+    if (importExportDataBoundInfo?.sqlExportScope === 'SCHEMA') {
+      return i18n('workspace.menu.exportStructure');
+    }
+    if (importExportDataBoundInfo?.sqlExportScope === 'ALL') {
+      return i18n('workspace.menu.exportStructureData');
+    }
+    return i18n('workspace.menu.exportData');
+  })();
+
   return (
     <Modal
       open={!!importExportDataBoundInfo}
       okText={i18n('common.button.start')}
       cancelText={i18n('common.button.cancel')}
-      title={
-        importExportDataBoundInfo?.type === ImportExportType.IMPORT
-          ? i18n('workspace.menu.importData')
-          : i18n('workspace.menu.exportData')
-      }
+      title={modalTitle}
       headerIconCode={importExportDataBoundInfo?.type === ImportExportType.IMPORT ? 'icon-upload' : 'icon-download'}
       headerBorder
       destroyOnClose
