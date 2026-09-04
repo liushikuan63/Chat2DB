@@ -3,6 +3,7 @@ package ai.chat2db.community.domain.core.impl.task.executor;
 import ai.chat2db.community.domain.api.model.task.ArtifactDraft;
 import ai.chat2db.community.domain.api.model.task.ExportTaskSpec;
 import ai.chat2db.community.domain.api.model.task.TaskCancelledException;
+import ai.chat2db.community.domain.api.model.task.TaskCompression;
 import ai.chat2db.community.domain.api.model.task.TaskConstants;
 import ai.chat2db.community.domain.api.model.task.TaskErrorCode;
 import ai.chat2db.community.domain.api.model.task.TaskEventCode;
@@ -15,6 +16,7 @@ import ai.chat2db.community.domain.api.service.task.TaskExecutor;
 import ai.chat2db.community.domain.core.impl.task.export.IExportStrategy;
 import ai.chat2db.community.domain.core.impl.task.export.ExportStrategyRegistry;
 import org.apache.commons.collections4.CollectionUtils;
+import org.apache.commons.lang3.StringUtils;
 import org.springframework.stereotype.Component;
 
 import java.util.Map;
@@ -47,9 +49,19 @@ public class TableDataExportTaskExecutor implements TaskExecutor<ExportTaskSpec>
                         "ZIP is an output container, not a table data format");
             }
             boolean multipleTables = CollectionUtils.size(spec.getTableNames()) > 1;
+            String compression = TaskExecutorSupport.requireCompression(spec.getCompression());
+            if (spec.getCheckpointRows() != null && spec.getCheckpointRows() > 0) {
+                requireAppendableCheckpointFormat(format, multipleTables);
+                if (TaskCompression.GZIP.equalsIgnoreCase(StringUtils.trimToEmpty(compression))) {
+                    // A crashed GZIP stream cannot be truncated to its checkpoint, so resuming it
+                    // would produce a corrupt archive.
+                    throw new TaskExecutionException(TaskErrorCode.EXPORT_FAILED.name(),
+                            "Checkpointed export cannot be combined with GZIP compression");
+                }
+            }
             String artifactFormat = multipleTables ? TaskFileFormat.ZIP.name() : format;
             String fileName = TaskExecutorSupport.artifactFileName(spec, spec.getSuggestedFileName(),
-                    artifactFormat);
+                    artifactFormat, compression);
             ArtifactDraft draft = context.createArtifact(spec.getExportPath(), fileName,
                     TaskExecutorSupport.mediaType(artifactFormat));
             context.logInfo(TaskEventCode.EXPORT_STARTED.name(), "Table data export started",
@@ -64,6 +76,20 @@ public class TableDataExportTaskExecutor implements TaskExecutor<ExportTaskSpec>
         } catch (Exception e) {
             throw new TaskExecutionException(TaskErrorCode.EXPORT_FAILED.name(),
                     "Could not export table data", e);
+        }
+    }
+
+    private static void requireAppendableCheckpointFormat(String format, boolean multipleTables) {
+        if (multipleTables) {
+            throw new TaskExecutionException(TaskErrorCode.EXPORT_FAILED.name(),
+                    "Checkpointed export supports a single table, not a ZIP archive");
+        }
+        switch (TaskFileFormat.valueOf(format)) {
+            case CSV, MARKDOWN, NDJSON, SQL -> {
+                // These append row by row, so a resumed run can continue the same file.
+            }
+            default -> throw new TaskExecutionException(TaskErrorCode.EXPORT_FAILED.name(),
+                    "Checkpointed export supports only CSV, MARKDOWN, NDJSON and SQL");
         }
     }
 }
