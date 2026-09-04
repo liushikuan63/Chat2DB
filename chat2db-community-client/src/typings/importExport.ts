@@ -1,9 +1,20 @@
 import { IDatabaseBaseInfo } from '@/typings/database';
-import { ImportExportType, ImportExportTaskType, ImportExportTaskStatus } from '@/constants/importExport';
+import {
+  ImportExportFileType,
+  ImportExportType,
+  ImportExportTaskType,
+  ImportExportTaskStatus,
+} from '@/constants/importExport';
+
+export type ImportExportTargetScope = 'DATA_SOURCE' | 'DATABASE' | 'SCHEMA' | 'TABLE';
+
+export type SqlExportScope = 'ALL' | 'SCHEMA' | 'TABLE';
 
 export interface ImportExportDataBoundInfo extends IDatabaseBaseInfo {
-  tableName: string;
+  targetScope: ImportExportTargetScope;
   type: ImportExportType;
+  fileType?: ImportExportFileType;
+  sqlExportScope?: SqlExportScope;
 }
 
 export interface ImportExportTaskDetails {
@@ -23,10 +34,53 @@ export interface ImportExportTaskDetails {
   errorCode?: string;
   errorMessage?: string;
   artifactId?: string;
+  artifacts?: ITaskArtifact[];
   createdAt: number | string;
   startedAt?: number | string;
   finishedAt?: number | string;
   updatedAt?: number | string;
+}
+
+export interface ITaskArtifact {
+  artifactId: string;
+  role: string;
+  mediaType?: string;
+  sizeBytes?: number;
+  createdAt?: number | string;
+}
+
+export interface IImportColumnMapping {
+  source: string;
+  target: string;
+}
+
+export interface IImportOptions {
+  charset?: string;
+  delimiter?: string;
+  quoteChar?: string;
+  skipRows?: number;
+  nullString?: string;
+  columnMappings?: IImportColumnMapping[];
+  onError?: 'ABORT' | 'SKIP';
+  maxErrors?: number;
+}
+
+/** Execution mode of bulk import/export tasks; absent resolves to STANDARD on the backend. */
+export type ImportExecutionMode = 'ULTRA_FAST' | 'STANDARD';
+
+export interface IImportColumnMatch {
+  fileColumn: string;
+  tableColumn?: string;
+  matched: boolean;
+}
+
+export interface IImportPreview {
+  fileColumns: string[];
+  columnMatches: IImportColumnMatch[];
+  missingTableColumns: string[];
+  sampleRows: string[][];
+  detectedCharset?: string;
+  detectedDelimiter?: string;
 }
 
 export interface ImportExportTaskEvent {
