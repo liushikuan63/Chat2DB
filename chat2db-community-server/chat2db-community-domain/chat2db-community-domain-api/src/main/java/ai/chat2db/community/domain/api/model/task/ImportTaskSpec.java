@@ -24,4 +24,14 @@ public class ImportTaskSpec implements TaskSpec {
     private String format;
 
     private String dataTimeFormat;
+
+    /**
+     * Optional behaviour overrides (encoding, delimiters, column mapping, error tolerance).
+     */
+    private ImportOptions options;
+
+    /**
+     * Execution mode, see {@link TaskExecutionMode}; {@code null} resolves to {@code STANDARD}.
+     */
+    private String mode;
 }
