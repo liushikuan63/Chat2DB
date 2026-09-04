@@ -20,6 +20,10 @@ import static ai.chat2db.plugin.h2.constant.H2DBManagerConstants.*;
 @Slf4j
 public class H2DBManager extends DefaultDBManager implements IDbManager {
 
+    @Override
+    public ai.chat2db.spi.model.export.ExportCapability getExportCapability() {
+        return ai.chat2db.spi.model.export.ExportCapability.KEYSET_SHARDING;
+    }
 
 
     @Override
