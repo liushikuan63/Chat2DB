@@ -5,42 +5,86 @@ import ai.chat2db.community.domain.api.model.task.CsvOptions;
 import ai.chat2db.community.domain.api.model.task.ImportTaskSpec;
 import ai.chat2db.community.domain.api.service.task.TaskExecutionContext;
 import ai.chat2db.community.domain.core.impl.db.CsvParser;
+import ai.chat2db.community.domain.core.impl.task.imports.BaseImporter;
+import ai.chat2db.community.domain.core.impl.task.imports.ImportColumnResolver;
+import ai.chat2db.community.domain.core.impl.task.imports.ImportRowBatcher;
 import ai.chat2db.community.domain.core.impl.task.imports.IImportStrategy;
-import com.alibaba.excel.support.ExcelTypeEnum;
+import ai.chat2db.spi.sql.Chat2DBContext;
 
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
-import java.util.Map;
 import java.util.List;
+import java.util.Map;
 
-public class CSVImporter extends BaseExcelImporter implements IImportStrategy {
+/** CSV import driven by the validated {@link CsvOptions} contract and the resumable row batcher. */
+public class CSVImporter extends BaseImporter implements IImportStrategy {
 
     @Override
-    protected void doImportData(ImportTaskSpec spec, TaskExecutionContext context, List<TableColumn> columns) {
+    protected void doImportData(ImportTaskSpec spec, TaskExecutionContext context,
+            List<TableColumn> columns) {
         CsvOptions options = (spec.getCsvOptions() == null ? CsvOptions.defaults() : spec.getCsvOptions()).validate();
-        NoModelDataListener listener = new NoModelDataListener(spec, context, columns);
-        boolean[] initialized = {false};
+        spec.setCsvOptions(options);
+        int skipRows = spec.getOptions() == null || spec.getOptions().getSkipRows() == null
+                ? 0 : Math.max(0, spec.getOptions().getSkipRows());
+        ImportRowBatcher[] batcher = {null};
         int[] sourceRow = {0};
-        new CsvParser(options).forEachRow(Path.of(spec.getSourceFile()), row -> {
-            int rowNumber = ++sourceRow[0];
-            if (Boolean.TRUE.equals(options.getHasHeader()) && rowNumber == options.getHeaderRow()) {
-                initialized[0] = true;
-                listener.acceptHead(row);
-                return;
+        int[] skippedDataRows = {0};
+        try {
+            new CsvParser(options).forEachRow(Path.of(spec.getSourceFile()), row -> {
+                int rowNumber = ++sourceRow[0];
+                if (Boolean.TRUE.equals(options.getHasHeader()) && rowNumber == options.getHeaderRow()) {
+                    batcher[0] = createBatcher(spec, context, columns, values(row));
+                    return;
+                }
+                if (rowNumber < options.getDataStartRow()
+                        || options.getDataEndRow() != null && rowNumber > options.getDataEndRow()) {
+                    return;
+                }
+                if (skippedDataRows[0] < skipRows) {
+                    skippedDataRows[0]++;
+                    return;
+                }
+                if (batcher[0] == null) {
+                    int width = Math.max(row.size(), mappedSourceColumnCount(spec));
+                    batcher[0] = createBatcher(spec, context, columns, values(syntheticHeader(width)));
+                }
+                batcher[0].accept(rowNumber, values(row));
+            }, context::checkCancelled);
+            if (batcher[0] != null) {
+                batcher[0].flush();
+                context.logInfo("IMPORT_SUMMARY", "CSV import finished", Map.of(
+                        "importedRows", batcher[0].importedRows(),
+                        "rejectedRows", batcher[0].rejectedRows()));
             }
-            if (rowNumber < options.getDataStartRow()
-                    || options.getDataEndRow() != null && rowNumber > options.getDataEndRow()) {
-                return;
+        } catch (RuntimeException failure) {
+            if (batcher[0] != null) {
+                batcher[0].abort(failure);
             }
-            if (!initialized[0]) {
-                initialized[0] = true;
-                listener.acceptHead(syntheticHeader(Math.max(row.size(), mappedSourceColumnCount(spec))));
+            throw failure;
+        } finally {
+            if (batcher[0] != null) {
+                batcher[0].close();
             }
-            listener.acceptRow(row, rowNumber);
-        }, context::checkCancelled);
-        if (initialized[0]) {
-            listener.finish();
         }
+    }
+
+    private ImportRowBatcher createBatcher(ImportTaskSpec spec, TaskExecutionContext context,
+            List<TableColumn> columns, List<String> headers) {
+        ImportColumnResolver.Resolution resolution = ImportColumnResolver.resolveForSpec(columns, headers, spec);
+        reportResolution(context, resolution);
+        ImportColumnResolver.validateForImport(columns, resolution, spec);
+        return new ImportRowBatcher(spec, context, resolution,
+                Chat2DBContext.getDbMetaData().getValueProcessor());
+    }
+
+    private static List<String> values(Map<Integer, String> row) {
+        int count = row.keySet().stream().mapToInt(Integer::intValue).max().orElse(-1) + 1;
+        List<String> values = new ArrayList<>(count);
+        for (int index = 0; index < count; index++) {
+            values.add(row.get(index));
+        }
+        return values;
     }
 
     private static Map<Integer, String> syntheticHeader(int columnCount) {
@@ -67,10 +111,5 @@ public class CSVImporter extends BaseExcelImporter implements IImportStrategy {
                 })
                 .max()
                 .orElse(0);
-    }
-
-    @Override
-    protected ExcelTypeEnum getExcelType() {
-        return ExcelTypeEnum.CSV;
     }
 }

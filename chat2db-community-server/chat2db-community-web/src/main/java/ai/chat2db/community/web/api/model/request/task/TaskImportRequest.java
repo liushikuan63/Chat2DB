@@ -33,4 +33,6 @@ public class TaskImportRequest extends DataSourceBaseRequest {
 
     /** Execution mode: ULTRA_FAST or STANDARD (default when absent). */
     private String mode;
+
+    private Boolean confirmedNoStrongRelations;
 }

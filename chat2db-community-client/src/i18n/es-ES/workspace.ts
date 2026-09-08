@@ -435,7 +435,7 @@ export default {
       '✅ Las importaciones y exportaciones de datos de tabla compatibles usan procesamiento paralelo multihilo',
     'workspace.importExport.ultraModeBenefit2': '✅ Ajuste adaptativo de hilos y tamaño de lote',
     'workspace.importExport.ultraModeBenefit3':
-      '✅ Evalúa el archivo completo antes de iniciar workers; usa modo estándar para archivos pequeños y rechaza riesgos graves',
+      '✅ Evalúa el archivo completo antes de iniciar workers y rechaza riesgos graves',
     'workspace.importExport.ultraModeRisk1': '⚠️ Mayor presión de conexiones en la base de datos origen (pool MySQL ≥ 16 recomendado)',
     'workspace.importExport.ultraModeRisk2': '⚠️ Uso de memoria ligeramente mayor (ResultSet y buffer por fragmento)',
     'workspace.importExport.ultraModeRisk3': '⚠️ No apto para datos con claves foráneas estrictas sin preparar (posibles deadlocks)',
@@ -451,7 +451,6 @@ export default {
     'workspace.importExport.modeBadgeUltra': '[Ultrarrápido]',
     'workspace.importExport.modeBadgeStandard': '[Estándar]',
   'workspace.importExport.charset': 'Conjunto de caracteres',
-  'workspace.importExport.delimiter': 'Delimitador',
   'workspace.importExport.quoteChar': 'Carácter de comillas',
   'workspace.importExport.skipRows': 'Filas a omitir',
   'workspace.importExport.nullString': 'Cadena NULL',

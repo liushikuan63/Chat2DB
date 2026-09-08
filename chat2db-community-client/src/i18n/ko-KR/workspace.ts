@@ -431,7 +431,7 @@ export default {
       '✅ 지원되는 테이블 데이터 가져오기/내보내기에 멀티스레드 병렬 처리 사용',
     'workspace.importExport.ultraModeBenefit2': '✅ 스레드 수와 배치 크기를 적응적으로 조정',
     'workspace.importExport.ultraModeBenefit3':
-      '✅ 작업자 시작 전 전체 파일을 판정하고 작은 파일은 표준 모드로, 심각한 위험은 명시적으로 거부',
+      '✅ 작업자 시작 전 전체 파일을 판정하고 심각한 위험은 명시적으로 거부',
     'workspace.importExport.ultraModeRisk1': '⚠️ 높은 동시성으로 원본 데이터베이스 연결 부담 증가 (MySQL 풀 ≥ 16 권장)',
     'workspace.importExport.ultraModeRisk2': '⚠️ 메모리 사용량 다소 증가 (샤드별 결과 집합 및 버퍼)',
     'workspace.importExport.ultraModeRisk3': '⚠️ 사전 준비되지 않은 엄격한 외래 키 데이터에는 부적합 (교착 상태 가능)',
@@ -447,7 +447,6 @@ export default {
     'workspace.importExport.modeBadgeUltra': '[초고속]',
     'workspace.importExport.modeBadgeStandard': '[표준]',
   'workspace.importExport.charset': '문자셋',
-  'workspace.importExport.delimiter': '구분자',
   'workspace.importExport.quoteChar': '따옴표 문자',
   'workspace.importExport.skipRows': '건너뛸 행 수',
   'workspace.importExport.nullString': 'NULL 문자열',

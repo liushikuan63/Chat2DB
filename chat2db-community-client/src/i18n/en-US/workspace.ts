@@ -139,8 +139,7 @@ export default {
     'workspace.importExport.ultraModeBenefit1':
       '✅ Supported table data imports and exports use multi-threaded parallel processing',
     'workspace.importExport.ultraModeBenefit2': '✅ Adaptive thread count and batch size for the best configuration',
-    'workspace.importExport.ultraModeBenefit3':
-      '✅ Runs full admission before workers start; small files use Standard and hard risks are rejected',
+    'workspace.importExport.ultraModeBenefit3': '✅ Runs full admission before workers start; hard risks are rejected',
     'workspace.importExport.ultraModeRisk1': '⚠️ Higher source-database connection pressure (MySQL pool ≥ 16 recommended)',
     'workspace.importExport.ultraModeRisk2': '⚠️ Slightly higher memory usage (per-shard result set and buffer)',
     'workspace.importExport.ultraModeRisk3': '⚠️ Not suitable for data with strict unprepared foreign keys (deadlocks possible)',
@@ -156,7 +155,6 @@ export default {
     'workspace.importExport.modeBadgeUltra': '[Ultra-Fast]',
     'workspace.importExport.modeBadgeStandard': '[Standard]',
   'workspace.importExport.charset': 'Charset',
-  'workspace.importExport.delimiter': 'Delimiter',
   'workspace.importExport.quoteChar': 'Quote character',
   'workspace.importExport.skipRows': 'Skip rows',
   'workspace.importExport.nullString': 'NULL string',

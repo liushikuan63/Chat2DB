@@ -135,7 +135,7 @@ export default {
       '✅ 対応するテーブルデータのインポート/エクスポートはマルチスレッド並列処理を使用',
     'workspace.importExport.ultraModeBenefit2': '✅ スレッド数とバッチサイズを適応的に調整し最適な構成に自動合わせ',
     'workspace.importExport.ultraModeBenefit3':
-      '✅ ワーカー開始前にファイル全体を判定し、小さいファイルは標準モード、重大なリスクは明示的に拒否',
+      '✅ ワーカー開始前にファイル全体を判定し、重大なリスクは明示的に拒否',
     'workspace.importExport.ultraModeRisk1': '⚠️ 高同時実行時にソース DB の接続圧力が増大（MySQL プール ≥ 16 推奨）',
     'workspace.importExport.ultraModeRisk2': '⚠️ メモリ使用量がやや増加（シャードごとの ResultSet とバッファ）',
     'workspace.importExport.ultraModeRisk3': '⚠️ 事前準備されていない厳格な外部キーのデータには不適（デッドロックの可能性）',
