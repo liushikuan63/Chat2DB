@@ -3,7 +3,6 @@ import { useStyles } from './style';
 import { IconButton, Empty, EmptyImage } from '@chat2db/ui';
 import { Progress, Spin, Tooltip } from 'antd';
 import i18n from '@/i18n';
-import RunSqlModal from '@/blocks/ImportAndExport/components/RunSqlModal';
 import ImportFileModal from '@/blocks/ImportAndExport/components/ImportFileModal';
 import importExportServices from '@/service/importExport';
 import { useImportExportStore } from '@/store/importExport';
@@ -293,7 +292,6 @@ export const TaskCenterModals = memo(() => {
   return (
     <>
       <LogModal />
-      <RunSqlModal />
       <ImportFileModal />
     </>
   );

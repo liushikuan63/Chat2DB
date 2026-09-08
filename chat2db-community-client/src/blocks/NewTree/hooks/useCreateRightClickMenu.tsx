@@ -46,7 +46,6 @@ import { compatibleDataBaseName, getDatabaseSupport } from '@/utils/database';
 import { isDatabaseCapabilitySupported } from '@/utils/databaseJudgments';
 import { dropMenuConfig } from '../menuConfig';
 
-import { handleExportSqlFile } from '@/blocks/ImportAndExport/functions/exportSqlFile';
 import { useOrgStore } from '@/store/workspaceContext';
 import { ILoadDataOptions, treeConfig } from '../treeConfig';
 
@@ -175,15 +174,11 @@ export const useCreateRightClickMenu = () => {
     };
   });
 
-  const { setImportExportDataBoundInfo, getTaskList, openLogModal } = useImportExportStore(
-    (state) => {
-      return {
-        setImportExportDataBoundInfo: state.setImportExportDataBoundInfo,
-        getTaskList: state.getTaskList,
-        openLogModal: state.openLogModal,
-      };
-    },
-  );
+  const { setImportExportDataBoundInfo } = useImportExportStore((state) => {
+    return {
+      setImportExportDataBoundInfo: state.setImportExportDataBoundInfo,
+    };
+  });
 
   const { openUnifiedConfirmationModal } = useGlobalStore((state) => {
     return {
@@ -215,6 +210,7 @@ export const useCreateRightClickMenu = () => {
       extraParams,
       clientRuntime.usesFixedIdentity,
     );
+    const importExportTargetScope = getImportExportTargetScope(treeNodeType);
 
     const persistIdentityColor = (nextIdentityColor: string | null) => {
       const targetDataSourceId = dataSourceId!;
@@ -248,7 +244,6 @@ export const useCreateRightClickMenu = () => {
     };
 
     const { supportSchema, supportDatabase } = getDatabaseSupport(databaseType);
-    const importExportTargetScope = getImportExportTargetScope(treeNodeType);
     const handelOpenCreateDatabaseModal = (type: 'database' | 'schema') => {
       const relyOnParams = {
         databaseType: treeNodeData.extraParams.databaseType!,
@@ -1098,42 +1093,48 @@ export const useCreateRightClickMenu = () => {
           {
             text: i18n('workspace.menu.exportStructure'),
             handle: () => {
-              handleExportSqlFile({
+              setImportExportDataBoundInfo({
                 dataSourceId: dataSourceId!,
+                dataSourceName,
                 databaseName,
                 schemaName,
-                tableNames: tableName ? [tableName] : undefined,
-                scope: 'SCHEMA',
-                getTaskList,
-                openLogModal,
+                tableName,
+                targetScope: importExportTargetScope,
+                type: ImportExportType.EXPORT,
+                fileType: ImportExportFileType.SQL,
+                sqlExportScope: 'SCHEMA',
               });
             },
           },
           {
             text: i18n('workspace.menu.exportData'),
             handle: () => {
-              handleExportSqlFile({
+              setImportExportDataBoundInfo({
                 dataSourceId: dataSourceId!,
+                dataSourceName,
                 databaseName,
                 schemaName,
-                tableNames: tableName ? [tableName] : undefined,
-                scope: 'TABLE',
-                getTaskList,
-                openLogModal,
+                tableName,
+                targetScope: importExportTargetScope,
+                type: ImportExportType.EXPORT,
+                fileType: ImportExportFileType.SQL,
+                sqlExportScope: 'TABLE',
               });
             },
           },
           {
             text: i18n('workspace.menu.exportStructureData'),
             handle: () => {
-              handleExportSqlFile({
+              setImportExportDataBoundInfo({
                 dataSourceId: dataSourceId!,
+                dataSourceName,
                 databaseName,
                 schemaName,
-                tableNames: tableName ? [tableName] : undefined,
-                scope: 'ALL',
-                getTaskList,
-                openLogModal,
+                tableName,
+                targetScope: importExportTargetScope,
+                type: ImportExportType.EXPORT,
+                fileType: ImportExportFileType.SQL,
+                sqlExportScope: 'ALL',
               });
             },
           },
@@ -1155,6 +1156,7 @@ export const useCreateRightClickMenu = () => {
             databaseName,
             schemaName,
             tableName: tableName!,
+            targetScope: 'TABLE',
             type: ImportExportType.EXPORT,
           });
         },
