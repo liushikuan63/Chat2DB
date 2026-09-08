@@ -58,9 +58,13 @@ public class TaskWebConverter {
                 .target(target(request.getDataSourceId(), request.getDatabaseName(), request.getSchemaName(),
                         request.getTableName()))
                 .sourceFile(sourceFile)
+                .importFileId(request.getFileId())
                 .displayFileName(StringUtils.defaultIfBlank(request.getDisplayFileName(), fileName(sourceFile)))
                 .format(format)
                 .dataTimeFormat(request.getDataTimeFormat())
+                .options(request.getOptions())
+                .unmappedTarget(request.getUnmappedTarget())
+                .mode(normalize(request.getMode()))
                 .build();
     }
 

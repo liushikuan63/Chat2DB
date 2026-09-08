@@ -308,12 +308,14 @@ const Log = (props: IProps) => {
               showScrollBar="optional"
             >
               {(event) => (
-                <ConsoleOutputMessageLine
-                  className={styles.virtualListItem}
-                  timestamp={event.createdAt}
-                  level={event.level}
-                  message={formatEventMessage(event.message)}
-                />
+                <div>
+                  <ConsoleOutputMessageLine
+                    className={styles.virtualListItem}
+                    timestamp={event.createdAt}
+                    level={event.level}
+                    message={formatEventMessage(event.message)}
+                  />
+                </div>
               )}
             </VirtualList>
           )}

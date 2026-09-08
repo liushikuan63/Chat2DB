@@ -1,7 +1,10 @@
 package ai.chat2db.community.domain.core.impl.task;
 
 import ai.chat2db.community.domain.api.model.PageResponse;
+import ai.chat2db.community.domain.api.model.task.ResumeState;
 import ai.chat2db.community.domain.api.model.task.Task;
+import ai.chat2db.community.domain.api.model.task.TaskArtifact;
+import ai.chat2db.community.domain.api.model.task.TaskArtifactRole;
 import ai.chat2db.community.domain.api.model.task.TaskConstants;
 import ai.chat2db.community.domain.api.model.task.TaskEvent;
 import ai.chat2db.community.domain.api.model.task.TaskProgress;
@@ -39,8 +42,10 @@ class ArtifactServiceTest {
     @Test
     void concurrentDraftsReserveDifferentTargetsAndPublishIndependently() throws IOException {
         ArtifactService service = new ArtifactService();
-        var first = service.createDraft(1L, tempDirectory.toString(), "export.csv", "text/csv");
-        var second = service.createDraft(2L, tempDirectory.toString(), "export.csv", "text/csv");
+        var first = service.createDraft(1L, TaskArtifactRole.OUTPUT, tempDirectory.toString(), "export.csv",
+                "text/csv");
+        var second = service.createDraft(2L, TaskArtifactRole.OUTPUT, tempDirectory.toString(), "export.csv",
+                "text/csv");
         assertNotEquals(first.getTargetFile(), second.getTargetFile());
         Files.writeString(first.getTemporaryFile().toPath(), "first");
         Files.writeString(second.getTemporaryFile().toPath(), "second");
@@ -58,11 +63,13 @@ class ArtifactServiceTest {
     @Test
     void failedPublicationReleasesReservedTarget() {
         ArtifactService service = new ArtifactService();
-        var failed = service.createDraft(1L, tempDirectory.toString(), "export.csv", "text/csv");
+        var failed = service.createDraft(1L, TaskArtifactRole.OUTPUT, tempDirectory.toString(), "export.csv",
+                "text/csv");
 
         assertThrows(IllegalStateException.class, () -> service.publish(failed));
 
-        var replacement = service.createDraft(2L, tempDirectory.toString(), "export.csv", "text/csv");
+        var replacement = service.createDraft(2L, TaskArtifactRole.OUTPUT, tempDirectory.toString(), "export.csv",
+                "text/csv");
         assertEquals(failed.getTargetFile(), replacement.getTargetFile());
         service.deleteDraft(replacement);
     }
@@ -119,7 +126,7 @@ class ArtifactServiceTest {
     }
 
     @Test
-    void artifactCommitFailureRestoresTaskAndPublishedArtifact() throws IOException {
+    void artifactCleanupFailureDoesNotRestoreADeletedTask() throws IOException {
         Path artifact = Files.writeString(tempDirectory.resolve("commit-failure.csv"), "value");
         RecordingTaskStorage storage = new RecordingTaskStorage(Task.builder()
                 .id(1L)
@@ -133,10 +140,35 @@ class ArtifactServiceTest {
             }
         };
 
-        assertThrows(IllegalStateException.class,
-                () -> new TaskServiceImpl(storage, null, artifactService).delete(1L));
+        new TaskServiceImpl(storage, null, artifactService).delete(1L);
 
-        assertEquals("value", Files.readString(artifact));
+        assertFalse(Files.exists(artifact));
+        assertTrue(storage.get(1L).isEmpty());
+        try (var files = Files.list(tempDirectory)) {
+            assertTrue(files.anyMatch(path -> path.getFileName().toString().contains(".task-delete-")));
+        }
+    }
+
+    @Test
+    void partialArtifactStagingFailureRestoresEarlierFiles() throws IOException {
+        Path first = Files.writeString(tempDirectory.resolve("first.csv"), "value");
+        Path invalid = Files.createDirectory(tempDirectory.resolve("directory-artifact"));
+        Files.writeString(invalid.resolve("child"), "value");
+        RecordingTaskStorage storage = new RecordingTaskStorage(Task.builder()
+                .id(1L)
+                .status(TaskStatus.SUCCESS.name())
+                .artifacts(List.of(
+                        TaskArtifact.builder().artifactId(first.toString())
+                                .role(TaskArtifactRole.OUTPUT).build(),
+                        TaskArtifact.builder().artifactId(invalid.toString())
+                                .role("REJECT").build()))
+                .build());
+
+        assertThrows(BusinessException.class,
+                () -> new TaskServiceImpl(storage, null, new ArtifactService()).delete(1L));
+
+        assertEquals("value", Files.readString(first));
+        assertTrue(Files.isDirectory(invalid));
         assertTrue(storage.get(1L).isPresent());
     }
 
@@ -282,6 +314,41 @@ class ArtifactServiceTest {
 
         @Override
         public List<Task> listNonTerminalTasks() {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public List<TaskArtifact> listArtifacts(Long taskId) {
+            return task == null || task.getArtifacts() == null ? List.of() : task.getArtifacts();
+        }
+
+        @Override
+        public void saveArtifact(Long taskId, TaskArtifact artifact) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public void deleteArtifact(Long taskId, String artifactId) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public List<Task> listResumableTasks() {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public void saveResumeState(Long taskId, ResumeState state) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public List<ResumeState> listResumeStates(Long taskId) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public void clearResumeStates(Long taskId) {
             throw new UnsupportedOperationException();
         }
     }
