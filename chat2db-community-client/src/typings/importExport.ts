@@ -11,7 +11,7 @@ export type ImportExportTargetScope = 'DATA_SOURCE' | 'DATABASE' | 'SCHEMA' | 'T
 export type SqlExportScope = 'ALL' | 'SCHEMA' | 'TABLE';
 
 export interface ImportExportDataBoundInfo extends IDatabaseBaseInfo {
-  targetScope?: ImportExportTargetScope;
+  targetScope: ImportExportTargetScope;
   type: ImportExportType;
   fileType?: ImportExportFileType;
   sqlExportScope?: SqlExportScope;

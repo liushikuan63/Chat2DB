@@ -31,6 +31,8 @@ const exportTypeOptions = [
   { label: 'XLSX', value: ImportExportFileType.XLSX, accept: '.xlsx' },
   { label: 'XLS', value: ImportExportFileType.XLS, accept: '.xls' },
   { label: 'JSON', value: ImportExportFileType.JSON, accept: '.json' },
+  { label: 'NDJSON', value: ImportExportFileType.NDJSON, accept: '.ndjson' },
+  { label: 'Markdown', value: ImportExportFileType.MARKDOWN, accept: '.md' },
   { label: 'SQL', value: ImportExportFileType.SQL, accept: '.sql' },
 ];
 
@@ -76,6 +78,7 @@ const ImportExportFile = forwardRef((props: IProps, ref: ForwardedRef<ImportExpo
   const isImport = importExportDataBoundInfo?.type === ImportExportType.IMPORT;
   const isExport = importExportDataBoundInfo?.type === ImportExportType.EXPORT;
   const isTableTarget = importExportDataBoundInfo?.targetScope === 'TABLE';
+  const isSqlExport = isExport && !!importExportDataBoundInfo?.sqlExportScope;
   const fileTypeOptions = importExportDataBoundInfo?.fileType
     ? exportTypeOptions.filter((option) => option.value === importExportDataBoundInfo.fileType)
     : isImport
@@ -348,6 +351,30 @@ const ImportExportFile = forwardRef((props: IProps, ref: ForwardedRef<ImportExpo
             />
           </div>
         </Form.Item>
+      )}
+      {isExport && !isSqlExport && (
+        <>
+          <Form.Item label={`${i18n('workspace.importExport.compression')}:`} name="compression">
+            <Select
+              allowClear
+              placeholder={i18n('workspace.importExport.off')}
+              options={[{ label: 'GZIP', value: 'GZIP' }]}
+            />
+          </Form.Item>
+          {!formValue.compression && checkpointableFormats.includes(formValue.exportType) && (
+            <Form.Item label={`${i18n('workspace.importExport.checkpoint')}:`} name="checkpointRows">
+              <Select
+                allowClear
+                placeholder={i18n('workspace.importExport.off')}
+                options={[
+                  { label: '10,000', value: 10000 },
+                  { label: '100,000', value: 100000 },
+                  { label: '1,000,000', value: 1000000 },
+                ]}
+              />
+            </Form.Item>
+          )}
+        </>
       )}
       {isImport && (
         <Form.Item className={styles.fullWidth} label={`${i18n('workspace.importExport.sourceFile')}:`}>
