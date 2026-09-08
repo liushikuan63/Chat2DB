@@ -1,7 +1,9 @@
 package ai.chat2db.community.domain.core.impl.task;
 
 import ai.chat2db.community.domain.api.model.PageResponse;
+import ai.chat2db.community.domain.api.model.task.ResumeState;
 import ai.chat2db.community.domain.api.model.task.Task;
+import ai.chat2db.community.domain.api.model.task.TaskArtifact;
 import ai.chat2db.community.domain.api.model.task.TaskEvent;
 import ai.chat2db.community.domain.api.model.task.TaskProgress;
 import ai.chat2db.community.domain.api.model.task.TaskQuery;
@@ -488,6 +490,41 @@ class TaskDeletionServiceImplTest {
 
         @Override
         public List<Task> listNonTerminalTasks() {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public List<TaskArtifact> listArtifacts(Long taskId) {
+            return List.of();
+        }
+
+        @Override
+        public void saveArtifact(Long taskId, TaskArtifact artifact) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public void deleteArtifact(Long taskId, String artifactId) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public List<Task> listResumableTasks() {
+            return List.of();
+        }
+
+        @Override
+        public void saveResumeState(Long taskId, ResumeState state) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public List<ResumeState> listResumeStates(Long taskId) {
+            return List.of();
+        }
+
+        @Override
+        public void clearResumeStates(Long taskId) {
             throw new UnsupportedOperationException();
         }
     }

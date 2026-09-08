@@ -48,5 +48,4 @@ class ArtifactServiceTest {
         assertEquals(failed.getTargetFile(), replacement.getTargetFile());
         service.deleteDraft(replacement);
     }
-
 }
