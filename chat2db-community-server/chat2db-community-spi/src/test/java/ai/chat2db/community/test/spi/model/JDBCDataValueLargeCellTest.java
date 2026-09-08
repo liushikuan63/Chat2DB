@@ -4,6 +4,7 @@ import ai.chat2db.spi.model.value.JDBCDataValue;
 import ai.chat2db.community.domain.api.model.result.ResultCell;
 import org.junit.jupiter.api.Test;
 
+import java.io.StringReader;
 import java.lang.reflect.InvocationHandler;
 import java.lang.reflect.Method;
 import java.lang.reflect.Proxy;
@@ -17,6 +18,8 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class JDBCDataValueLargeCellTest {
+
+    private static final int LARGE_TEXT_LENGTH = 1024 * 1024 + 1;
 
     @Test
     void classifiesTwentyMbTextSummaryAsLargeTextCell() {
@@ -81,6 +84,24 @@ class JDBCDataValueLargeCellTest {
         assertEquals((long) json.length(), cell.getSizeChars());
         assertEquals(200L, cell.getLoadedBytes());
         assertEquals(200L, cell.getLoadedChars());
+    }
+
+    @Test
+    void readsCompleteCharacterStreamWhenSizeLimitIsDisabled() {
+        String text = "x".repeat(LARGE_TEXT_LENGTH);
+        ResultSet resultSet = resultSet("getCharacterStream", new StringReader(text));
+        JDBCDataValue value = new JDBCDataValue(resultSet, metaData("LONGTEXT", Types.LONGVARCHAR), 1, false);
+
+        assertEquals(text, value.getCharsetString());
+    }
+
+    @Test
+    void summarizesLargeCharacterStreamWhenSizeLimitIsEnabled() {
+        String text = "x".repeat(LARGE_TEXT_LENGTH);
+        ResultSet resultSet = resultSet("getCharacterStream", new StringReader(text));
+        JDBCDataValue value = new JDBCDataValue(resultSet, metaData("LONGTEXT", Types.LONGVARCHAR), 1, true);
+
+        assertEquals("[LONGTEXT] 1.00 MB", value.getCharsetString());
     }
 
     @Test
