@@ -4,6 +4,7 @@ import ai.chat2db.community.domain.api.model.metadata.Procedure;
 import ai.chat2db.community.domain.api.service.task.TaskExecutionContext;
 import ai.chat2db.spi.model.datasource.ConnectInfo;
 import ai.chat2db.spi.model.export.ExportCapability;
+import ai.chat2db.spi.model.imports.ImportResourceSnapshot;
 
 import java.sql.Connection;
 import java.sql.SQLException;
@@ -27,6 +28,15 @@ public interface IDbManager {
      */
     default boolean startConsistentExportSnapshot(Connection connection) throws SQLException {
         return false;
+    }
+
+    /**
+     * Captures dialect-owned resource and safety facts without mutating the database. Unknown is
+     * explicit so the admission layer never mistakes a missing probe for a successful check.
+     */
+    default ImportResourceSnapshot probeImportResources(Connection connection, String databaseName,
+            String schemaName) {
+        return ImportResourceSnapshot.unknown("This database plugin does not provide import resource probes");
     }
 
     default Connection openConnection(ConnectInfo connectInfo) {

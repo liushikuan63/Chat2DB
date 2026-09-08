@@ -33,6 +33,7 @@ import ai.chat2db.spi.IPlugin;
 import ai.chat2db.spi.IDbManager;
 import ai.chat2db.plugin.mysql.MysqlDBManager;
 import ai.chat2db.spi.model.datasource.ConnectInfo;
+import ai.chat2db.spi.model.imports.ImportResourceSnapshot;
 import ai.chat2db.spi.sql.Chat2DBContext;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.AfterEach;
@@ -349,6 +350,17 @@ class MySQLTaskRoundTripIT {
         assertEquals(ROWS, ids.size(), "resumed export must produce every row exactly once");
         assertEquals(1, ids.get(0));
         assertEquals(ROWS, ids.get(ROWS - 1));
+    }
+
+    @Test
+    void mysqlResourceProbeReadsLiveCapacityReplicationAndTriggerFacts() {
+        ImportResourceSnapshot resources = mysqlDbManager.probeImportResources(connection, database, null);
+
+        assertTrue(resources.connectionCapacityKnown());
+        assertTrue(resources.maxConnections() > resources.activeConnections());
+        assertTrue(resources.replicationStatusKnown());
+        assertEquals(0, resources.triggerCount());
+        assertTrue(!resources.diskCapacityKnown());
     }
 
     private static final class CsvITExporter extends BaseExporter {
