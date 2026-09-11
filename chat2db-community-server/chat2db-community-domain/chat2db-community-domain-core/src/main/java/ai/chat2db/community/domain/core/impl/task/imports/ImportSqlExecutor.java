@@ -81,8 +81,11 @@ public final class ImportSqlExecutor {
             return;
         }
         context.checkCancelled();
+        // The whole row batch is one transaction: the resume watermark is batch-granular, so a
+        // failure must not leave a committed prefix that the watermark does not cover, otherwise a
+        // resume would replay durable rows into duplicate-key rejections.
         DefaultSQLExecutor.getInstance().executeBatchInsert(
-                Chat2DBContext.getConnection(), List.copyOf(inserts), context, context::checkCancelled);
+                Chat2DBContext.getConnection(), List.copyOf(inserts), context, context::checkCancelled, 0);
         inserts.clear();
     }
 

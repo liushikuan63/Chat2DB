@@ -1742,9 +1742,23 @@ public class DefaultSQLExecutor implements ICommandExecutor {
     public void executeBatchInsert(Connection connection, List<String> sqlCacheList,
                                    ISqlExecutionStatementListener statementListener,
                                    Runnable cancellationChecker) {
+        executeBatchInsert(connection, sqlCacheList, statementListener, cancellationChecker,
+                BATCH_INSERT_CHUNK_SIZE);
+    }
+
+    /**
+     * Executes the statements in JDBC batches of at most {@code chunkSize} statements and commits
+     * once per executed chunk. Callers that need one atomic unit - a failed execution must not
+     * leave a committed prefix behind - pass {@code 0} to disable chunking, so the whole list is
+     * one transaction.
+     */
+    public void executeBatchInsert(Connection connection, List<String> sqlCacheList,
+                                   ISqlExecutionStatementListener statementListener,
+                                   Runnable cancellationChecker, int chunkSize) {
         if (sqlCacheList == null || sqlCacheList.isEmpty()) {
             return;
         }
+        int effectiveChunkSize = chunkSize > 0 ? chunkSize : sqlCacheList.size();
         boolean manageTransaction;
         try {
             manageTransaction = connection.getAutoCommit();
@@ -1761,11 +1775,11 @@ public class DefaultSQLExecutor implements ICommandExecutor {
                 connection.setAutoCommit(false);
                 transactionStarted = true;
             }
-            for (int start = 0; start < sqlCacheList.size(); start += BATCH_INSERT_CHUNK_SIZE) {
+            for (int start = 0; start < sqlCacheList.size(); start += effectiveChunkSize) {
                 chunkOpen = manageTransaction;
                 checkTaskCancellation(cancellationChecker);
                 List<String> chunk = sqlCacheList.subList(start,
-                        Math.min(sqlCacheList.size(), start + BATCH_INSERT_CHUNK_SIZE));
+                        Math.min(sqlCacheList.size(), start + effectiveChunkSize));
                 executeInsertChunk(connection, chunk, statementListener, cancellationChecker);
                 if (manageTransaction) {
                     connection.commit();
