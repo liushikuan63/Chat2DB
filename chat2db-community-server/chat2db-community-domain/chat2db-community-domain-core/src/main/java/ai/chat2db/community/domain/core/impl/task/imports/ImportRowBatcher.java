@@ -65,8 +65,9 @@ import java.util.concurrent.atomic.LongAdder;
  *
  * <p>Parallel execution starts at the fast-mode contract baseline of {@code 4} workers and
  * {@code 20000} rows per batch, shrinks to at most {@code 1} worker and {@code 100} rows when the
- * target is slow, and grows in steps while the measured throughput keeps improving - there is no
- * configured upper bound, the database feedback is the ceiling. The
+ * target is slow, and grows in steps while the measured throughput keeps improving - bounded by
+ * the machine's available parallelism, so it can never out-run the threads this computer actually
+ * has left. The
  * {@code chat2db.task.import.parallelism} system property overrides the fan-out
  * ({@code 1} forces the serial path, a larger value pins the worker count). Finished batches are
  * handed to partitioned queues: per worker the order is strict, while workers run in parallel, and
@@ -247,11 +248,12 @@ public final class ImportRowBatcher implements AutoCloseable {
                 for (int index = 0; index < requestedWorkers; index++) {
                     builtQueues.add(new ArrayBlockingQueue<>(QUEUE_CAPACITY));
                 }
-                // By default there is no configured ceiling: the AIMD tuning is the only authority
-                // on the fan-out and the batcher grows its worker pool to match what the target
-                // database sustains. An explicit chat2db.task.import.parallelism pins the fan-out,
-                // so the ceiling is that value instead of unbounded.
-                int gateCeiling = parallelismPinned() ? requestedWorkers : Integer.MAX_VALUE;
+                // The fan-out may grow, but never past the machine's available parallelism: the
+                // AIMD tuning moves inside [BASE_WORKERS, machineThreadCeiling()], and an explicit
+                // chat2db.task.import.parallelism pin is bounded by the same ceiling.
+                int gateCeiling = parallelismPinned()
+                        ? Math.min(requestedWorkers, machineThreadCeiling())
+                        : machineThreadCeiling();
                 builtGate = AdaptiveConcurrencyGate.create(Math.min(BASE_WORKERS, requestedWorkers),
                         gateCeiling);
                 builtPool = Executors.newCachedThreadPool(runnable -> {
@@ -497,6 +499,15 @@ public final class ImportRowBatcher implements AutoCloseable {
      * workers each need their own connection, so without a JDBC url (test fixtures and
      * non-relational sources bind a prebuilt connection instead) the batcher stays serial.
      */
+    /**
+     * Upper bound of the import fan-out: how many processors this JVM may use. The adaptive gate
+     * grows at most to that many concurrent batches, so an import can never request more threads
+     * than the machine has left to run them.
+     */
+    private static int machineThreadCeiling() {
+        return Math.max(1, Runtime.getRuntime().availableProcessors());
+    }
+
     /** Whether {@code chat2db.task.import.parallelism} pins the fan-out explicitly. */
     private static boolean parallelismPinned() {
         return Integer.getInteger("chat2db.task.import.parallelism", 0) > 1;
@@ -511,7 +522,7 @@ public final class ImportRowBatcher implements AutoCloseable {
             return 1;
         }
         if (configured > 1) {
-            return configured;
+            return Math.min(configured, machineThreadCeiling());
         }
         return BASE_WORKERS;
     }

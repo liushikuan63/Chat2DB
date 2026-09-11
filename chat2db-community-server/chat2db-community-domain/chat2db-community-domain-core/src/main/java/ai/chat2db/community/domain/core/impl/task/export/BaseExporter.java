@@ -99,8 +99,8 @@ public abstract class BaseExporter implements IExportStrategy {
     private static final Object SHARD_END = new Object();
 
     /**
-     * Shards per table export. Defaults to {@code max(16, cores * 4)}, i.e. the plan is sized from
-     * the machine and the key range rather than a small constant; set the
+     * Shards per table export. Defaults to the machine's available parallelism (the processor
+     * count), so the plan never asks for more threads than the computer can run; set the
      * {@code chat2db.task.shard.max-parallelism} property explicitly to pin or disable (1) the
      * fan-out. Unmanaged instantiation keeps 1, the single-cursor path. The active fan-out starts
      * at the fast-mode baseline of 4 and is tuned inside [1, workers] by the adaptive gate.
@@ -404,13 +404,13 @@ public abstract class BaseExporter implements IExportStrategy {
      */
     private static final java.util.concurrent.Semaphore SHARD_GATE = new java.util.concurrent.Semaphore(
             Integer.getInteger("chat2db.task.shard.total-parallelism",
-                    Math.max(16, Runtime.getRuntime().availableProcessors() * 4)));
+                    Math.max(2, Runtime.getRuntime().availableProcessors())));
 
     private boolean tryShardExport(ExportTaskSpec spec, String tableName, TaskExecutionContext context,
             OutputStream output, SinkFactory sinkFactory, ExportValueMode mode,
             SqlExecutionPlan executionPlan, ExportProgressLogger progressLogger) {
         int configuredMax = shardMaxParallelism > 0 ? shardMaxParallelism
-                : Math.max(16, Runtime.getRuntime().availableProcessors() * 4);
+                : Math.max(2, Runtime.getRuntime().availableProcessors());
         // SQL dumps shard too: rows are converted to dialect literals on the shard threads and
         // the ordered drain keeps the statements in key order, so the artifact carries the same
         // content as the single-cursor dump while reading with the adaptive fan-out.

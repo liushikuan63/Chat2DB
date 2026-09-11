@@ -221,6 +221,8 @@ class ImportRowBatcherParallelTest {
                 "the producer must have more than one submitted batch in flight");
         assertTrue(tuning.gatePermits() <= 4,
                 "an explicit parallelism pin must cap the adaptive fan-out, got " + tuning.gatePermits());
+        assertTrue(tuning.gatePermits() <= Runtime.getRuntime().availableProcessors(),
+                "the fan-out must never exceed the machine's available parallelism");
     }
 
     @Test
