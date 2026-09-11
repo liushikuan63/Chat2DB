@@ -682,13 +682,14 @@ public abstract class BaseExporter implements IExportStrategy {
     }
 
     /**
-     * Optionally pins the shard read to one consistent repeatable-read transaction so concurrent
-     * source updates cannot tear the shard's pages apart. Off by default (auto-commit reads stay
-     * the contract), delegated to the database plugin, and any failure degrades to the plain
-     * auto-commit read.
+     * Pins the shard read to the dialect's consistent snapshot so concurrent source updates cannot
+     * tear the shard's pages apart. On by default, delegated to the database plugin: a dialect
+     * without a snapshot, or one whose statement the server rejects (for example SQL Server
+     * without ALLOW_SNAPSHOT_ISOLATION), degrades to the plain auto-commit read. Disable with
+     * {@code -Dchat2db.task.shard.consistent-snapshot=false}.
      */
     private boolean startConsistentSnapshotIfEnabled() {
-        if (!Boolean.parseBoolean(System.getProperty("chat2db.task.shard.consistent-snapshot", "false"))) {
+        if (!Boolean.parseBoolean(System.getProperty("chat2db.task.shard.consistent-snapshot", "true"))) {
             return false;
         }
         try {
