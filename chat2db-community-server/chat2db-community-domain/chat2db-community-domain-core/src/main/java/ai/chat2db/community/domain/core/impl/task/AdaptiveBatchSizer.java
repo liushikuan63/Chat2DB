@@ -23,6 +23,8 @@ public final class AdaptiveBatchSizer {
     /** Smoothing of the reference throughput so one noisy batch cannot flip the direction. */
     private static final double REFERENCE_ALPHA = 0.5D;
 
+    private final int maxBatch;
+
     private final AtomicInteger batchSize;
 
     /** When {@code false} the sizer stays fixed at its initial size (standard mode). */
@@ -31,11 +33,20 @@ public final class AdaptiveBatchSizer {
     private double referenceThroughput = -1.0D;
 
     public AdaptiveBatchSizer(int initialBatch) {
-        this(initialBatch, true);
+        this(initialBatch, true, Integer.MAX_VALUE);
     }
 
     public AdaptiveBatchSizer(int initialBatch, boolean adaptive) {
-        this.batchSize = new AtomicInteger(Math.max(MIN_BATCH, initialBatch));
+        this(initialBatch, adaptive, Integer.MAX_VALUE);
+    }
+
+    /**
+     * @param maxBatch largest size the tuner may grow to; callers whose batches are buffered by a
+     *                 single writer bound it (SINK_BATCH style) instead of growing without limit.
+     */
+    public AdaptiveBatchSizer(int initialBatch, boolean adaptive, int maxBatch) {
+        this.maxBatch = Math.max(MIN_BATCH, maxBatch);
+        this.batchSize = new AtomicInteger(clamp(initialBatch));
         this.adaptive = adaptive;
     }
 
@@ -55,13 +66,17 @@ public final class AdaptiveBatchSizer {
         int current = batchSize.get();
         if (referenceThroughput > 0.0D) {
             if (throughput > referenceThroughput * GROW_MARGIN) {
-                batchSize.set(current * 2);
+                batchSize.set(clamp(current * 2));
             } else if (throughput < referenceThroughput * SHRINK_MARGIN) {
-                batchSize.set(Math.max(MIN_BATCH, current / 2));
+                batchSize.set(clamp(current / 2));
             }
         }
         referenceThroughput = referenceThroughput <= 0.0D
                 ? throughput
                 : REFERENCE_ALPHA * throughput + (1.0D - REFERENCE_ALPHA) * referenceThroughput;
+    }
+
+    private int clamp(int value) {
+        return Math.max(MIN_BATCH, Math.min(maxBatch, value));
     }
 }

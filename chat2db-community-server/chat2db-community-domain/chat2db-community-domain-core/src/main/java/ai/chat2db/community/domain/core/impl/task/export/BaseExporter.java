@@ -459,7 +459,9 @@ public abstract class BaseExporter implements IExportStrategy {
         // the merge loop below submits shards only while the gate admits, and the fixed pool only
         // bounds the threads.
         AdaptiveConcurrencyGate gate = AdaptiveConcurrencyGate.create(Math.min(4, workers), workers);
-        AdaptiveBatchSizer batchSizer = new AdaptiveBatchSizer(SINK_BATCH_ROWS);
+        // The sink is drained by one writer, so its batch is bounded by one shard page: growing it
+        // further only buffers more rows per flush and starves the ordered merge.
+        AdaptiveBatchSizer batchSizer = new AdaptiveBatchSizer(SINK_BATCH_ROWS, true, SHARD_PAGE_ROWS);
         ShardPagePlan pagePlan = new ShardPagePlan();
         TaskResumeJournal journal = TaskResumeJournal.open(context.taskId(), null);
         java.util.concurrent.ExecutorService pool = java.util.concurrent.Executors.newFixedThreadPool(workers,
@@ -1084,7 +1086,7 @@ public abstract class BaseExporter implements IExportStrategy {
             this.keyColumn = keyColumn;
             this.cursorLiteral = resumedCursor;
             this.resuming = resuming;
-            this.sizer = new AdaptiveBatchSizer(SINK_BATCH_ROWS, adaptiveSizing);
+            this.sizer = new AdaptiveBatchSizer(SINK_BATCH_ROWS, adaptiveSizing, SHARD_PAGE_ROWS);
         }
 
         private List<KeyBound> bounds() {
@@ -1114,7 +1116,7 @@ public abstract class BaseExporter implements IExportStrategy {
         IValueProcessor valueProcessor = mode == ExportValueMode.NATIVE
                 ? Chat2DBContext.getDbMetaData().getValueProcessor() : null;
         List<List<Object>> batch = new ArrayList<>(SINK_BATCH_ROWS);
-        AdaptiveBatchSizer batchSizer = new AdaptiveBatchSizer(SINK_BATCH_ROWS, adaptiveSizing);
+        AdaptiveBatchSizer batchSizer = new AdaptiveBatchSizer(SINK_BATCH_ROWS, adaptiveSizing, SHARD_PAGE_ROWS);
         int exportedRows = 0;
         try {
             sink.writeSchema(new ExportSchema(columnNames), tableName);

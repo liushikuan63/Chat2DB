@@ -70,6 +70,19 @@ class AdaptiveBatchSizerTest {
     }
 
     @Test
+    void respectsTheConfiguredGrowthCeiling() {
+        AdaptiveBatchSizer sizer = new AdaptiveBatchSizer(1_000, true, 8_000);
+        long nanos = 10 * MILLI;
+        sizer.record(1_000, nanos);
+        for (int round = 0; round < 10; round++) {
+            nanos = Math.max(1L, nanos / 2);
+            sizer.record(1_000, nanos);
+        }
+        assertEquals(8_000, sizer.batchSize(),
+                "single-writer callers bound the growth: the size must stop at the ceiling");
+    }
+
+    @Test
     void ignoresInvalidObservations() {
         AdaptiveBatchSizer sizer = new AdaptiveBatchSizer(500);
         sizer.record(0, MILLI);
