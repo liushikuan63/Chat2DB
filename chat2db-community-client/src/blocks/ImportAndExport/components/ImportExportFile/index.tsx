@@ -376,7 +376,7 @@ const ImportExportFile = forwardRef((props: IProps, ref: ForwardedRef<ImportExpo
       )}
       {isImport && (
         <Form.Item className={styles.fullWidth} label={`${i18n('workspace.importExport.sourceFile')}:`}>
-          <UploadLocalFile fileUrlListChange={handleFileUrlListChange} accept={uploadLocalFileAccept} fileSize={50} />
+          <UploadLocalFile fileUrlListChange={handleFileUrlListChange} accept={uploadLocalFileAccept} fileSize={2048} />
         </Form.Item>
       )}
       {isImport && formValue.exportType === ImportExportFileType.CSV && (
