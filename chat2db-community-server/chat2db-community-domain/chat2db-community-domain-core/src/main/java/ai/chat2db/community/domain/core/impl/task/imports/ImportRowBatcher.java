@@ -181,18 +181,39 @@ public final class ImportRowBatcher implements AutoCloseable {
 
     private long batchesSinceCheckpoint;
 
+    private long rowsSinceJournal;
+
+    private long rowsSinceCheckpoint;
+
+    private long rowsSinceSnapshot;
+
     // Intervals are read per construction (not class-load) so tests can retune them reliably.
+    // Every layer fires on whichever comes first, its batch interval or its row interval: with
+    // 20000-row baseline batches a batch-only cadence would leave up to 1.28M rows between
+    // storage checkpoints, and a crash resume would replay (and reject) all of them.
     /** Batch interval of the Layer-1 journal progress records. */
     private final int journalProgressInterval =
             Integer.getInteger("chat2db.task.import.journal-interval", 8);
+
+    /** Row interval of the Layer-1 journal progress records. */
+    private final long journalRowInterval =
+            Long.getLong("chat2db.task.import.journal-rows", 20_000L);
 
     /** Batch interval of the Layer-2 task-storage checkpoints. */
     private final int checkpointInterval =
             Integer.getInteger("chat2db.task.import.checkpoint-interval", 64);
 
+    /** Row interval of the Layer-2 task-storage checkpoints. */
+    private final long checkpointRowInterval =
+            Long.getLong("chat2db.task.import.checkpoint-rows", 50_000L);
+
     /** Batch interval of the Layer-3 committed-snapshot generations. */
     private final int snapshotInterval =
             Integer.getInteger("chat2db.task.import.snapshot-interval", 256);
+
+    /** Row interval of the Layer-3 committed-snapshot generations. */
+    private final long snapshotRowInterval =
+            Long.getLong("chat2db.task.import.snapshot-rows", 50_000L);
 
     public ImportRowBatcher(ImportTaskSpec spec, TaskExecutionContext context, Resolution resolution,
             IValueProcessor valueProcessor) {
@@ -226,10 +247,13 @@ public final class ImportRowBatcher implements AutoCloseable {
                 for (int index = 0; index < requestedWorkers; index++) {
                     builtQueues.add(new ArrayBlockingQueue<>(QUEUE_CAPACITY));
                 }
-                // No configured ceiling: the AIMD tuning is the only authority on the fan-out and
-                // the batcher grows its worker pool to match what the target database sustains.
+                // By default there is no configured ceiling: the AIMD tuning is the only authority
+                // on the fan-out and the batcher grows its worker pool to match what the target
+                // database sustains. An explicit chat2db.task.import.parallelism pins the fan-out,
+                // so the ceiling is that value instead of unbounded.
+                int gateCeiling = parallelismPinned() ? requestedWorkers : Integer.MAX_VALUE;
                 builtGate = AdaptiveConcurrencyGate.create(Math.min(BASE_WORKERS, requestedWorkers),
-                        Integer.MAX_VALUE);
+                        gateCeiling);
                 builtPool = Executors.newCachedThreadPool(runnable -> {
                     Thread thread = new Thread(runnable, "chat2db-import-" + context.taskId());
                     thread.setDaemon(true);
@@ -422,7 +446,7 @@ public final class ImportRowBatcher implements AutoCloseable {
                 // Removed only on full handling: a failed batch keeps its rows un-durable, so the
                 // watermark must stay below it or a resume would skip live rows.
                 inFlightFirstRows.remove(batch.seq());
-                maybeCheckpoint();
+                maybeCheckpoint(rows);
             }
             if (workerPool != null) {
                 batchCompleted();
@@ -473,6 +497,11 @@ public final class ImportRowBatcher implements AutoCloseable {
      * workers each need their own connection, so without a JDBC url (test fixtures and
      * non-relational sources bind a prebuilt connection instead) the batcher stays serial.
      */
+    /** Whether {@code chat2db.task.import.parallelism} pins the fan-out explicitly. */
+    private static boolean parallelismPinned() {
+        return Integer.getInteger("chat2db.task.import.parallelism", 0) > 1;
+    }
+
     private static int effectiveWorkerCount(ConnectInfo connectInfo) {
         if (StringUtils.isBlank(connectInfo.getUrl())) {
             return 1;
@@ -568,15 +597,25 @@ public final class ImportRowBatcher implements AutoCloseable {
         return Math.min(firstInFlight, Math.min(firstBuffered, lastAcceptedRow + 1));
     }
 
-    /** Layered cadence: journal every 8, storage checkpoint every 64, snapshot every 256 batches. */
-    private void maybeCheckpoint() {
+    /**
+     * Layered cadence: journal every 8 batches or 20k rows, storage checkpoint every 64 batches or
+     * 50k rows, snapshot every 256 batches or 50k rows - whichever comes first, so the resume
+     * window stays bounded in rows however large the tuned batch grows.
+     */
+    private void maybeCheckpoint(int batchRows) {
         batchesSinceCheckpoint++;
+        rowsSinceJournal += batchRows;
+        rowsSinceCheckpoint += batchRows;
+        rowsSinceSnapshot += batchRows;
         long rowsDone = durableWatermark() - 1;
         try {
-            if (journal != null && batchesSinceCheckpoint % journalProgressInterval == 0) {
+            if (journal != null && (batchesSinceCheckpoint % journalProgressInterval == 0
+                    || rowsSinceJournal >= journalRowInterval)) {
                 journal.progress("IMPORTING", rowsDone);
+                rowsSinceJournal = 0L;
             }
-            if (batchesSinceCheckpoint % checkpointInterval == 0) {
+            if (batchesSinceCheckpoint % checkpointInterval == 0
+                    || rowsSinceCheckpoint >= checkpointRowInterval) {
                 context.checkpoint(ResumeState.builder()
                         .shardNo(0)
                         .kind(RESUME_KIND_IMPORT)
@@ -584,9 +623,12 @@ public final class ImportRowBatcher implements AutoCloseable {
                         .rowsDone(rowsDone)
                         .updatedAt(new Date())
                         .build());
+                rowsSinceCheckpoint = 0L;
             }
-            if (journal != null && batchesSinceCheckpoint % snapshotInterval == 0) {
+            if (journal != null && (batchesSinceCheckpoint % snapshotInterval == 0
+                    || rowsSinceSnapshot >= snapshotRowInterval)) {
                 journal.snapshot(rowsDone);
+                rowsSinceSnapshot = 0L;
             }
         } catch (TaskCancelledException cancellation) {
             throw cancellation;

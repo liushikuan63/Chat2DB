@@ -219,6 +219,8 @@ class ImportRowBatcherParallelTest {
         assertTrue(tuning.batches() > 1, "the import must be split into several batches");
         assertTrue(tuning.peakInFlightBatches() > 1,
                 "the producer must have more than one submitted batch in flight");
+        assertTrue(tuning.gatePermits() <= 4,
+                "an explicit parallelism pin must cap the adaptive fan-out, got " + tuning.gatePermits());
     }
 
     @Test

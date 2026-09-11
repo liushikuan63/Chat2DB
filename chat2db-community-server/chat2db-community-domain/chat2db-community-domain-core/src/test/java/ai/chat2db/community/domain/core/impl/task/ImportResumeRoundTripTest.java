@@ -179,6 +179,27 @@ class ImportResumeRoundTripTest {
         assertEquals(1, countIds(POISON_ID));
     }
 
+    /**
+     * The batch cadence alone would let one tuned batch (20000 rows) sit between checkpoints; the
+     * row interval must keep the resume window bounded in rows regardless of the batch size.
+     */
+    @Test
+    void rowIntervalDrivesCheckpointsWhenTheBatchIntervalIsFarAway() throws Exception {
+        System.setProperty(CHECKPOINT_INTERVAL_PROPERTY, "100000");
+        System.setProperty("chat2db.task.import.checkpoint-rows", "20000");
+        Path csv = writeCsv();
+
+        // SKIP mode: the pre-inserted poison row is rejected, the rest of the file imports.
+        new CSVImporter().run(csvSpec(csv, "SKIP"), contextFor());
+
+        long checkpoints = storage.resumeStates.stream()
+                .filter(state -> state.getKind() != null && state.getRowsDone() != null)
+                .count();
+        assertTrue(checkpoints >= 4,
+                "the row interval must checkpoint at least every 20000 rows, got " + checkpoints);
+        assertEquals(ROWS, countRows(), "the import itself must still land every row");
+    }
+
     private Path writeCsv() throws Exception {
         Path csv = tempDirectory.resolve("resume.csv");
         StringBuilder content = new StringBuilder("ID,NAME\n");
