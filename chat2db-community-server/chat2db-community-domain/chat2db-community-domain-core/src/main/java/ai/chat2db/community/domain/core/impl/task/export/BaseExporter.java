@@ -78,10 +78,16 @@ public abstract class BaseExporter implements IExportStrategy {
     public static final int EXPORT_BATCH_ROWS = 1000;
 
     /**
-     * Rows handed to a {@link FormatSink} per batch: the fast-mode contract baseline of 20000 rows,
-     * which the adaptive sizer may grow further (down to 100) as the target sustains it.
+     * Rows handed to a {@link FormatSink} per batch on the standard path: the historical value,
+     * untouched by the fast mode.
      */
-    public static final int SINK_BATCH_ROWS = 20_000;
+    public static final int SINK_BATCH_ROWS = 500;
+
+    /**
+     * Fast-mode contract baseline for sink batches, which the adaptive sizer may grow further
+     * (down to 100) as the target sustains it.
+     */
+    public static final int FAST_MODE_SINK_BATCH_ROWS = 20_000;
 
     /**
      * Resume-state kind written by the checkpointed export path.
@@ -461,7 +467,8 @@ public abstract class BaseExporter implements IExportStrategy {
         AdaptiveConcurrencyGate gate = AdaptiveConcurrencyGate.create(Math.min(4, workers), workers);
         // The sink is drained by one writer, so its batch is bounded by one shard page: growing it
         // further only buffers more rows per flush and starves the ordered merge.
-        AdaptiveBatchSizer batchSizer = new AdaptiveBatchSizer(SINK_BATCH_ROWS, true, SHARD_PAGE_ROWS);
+        AdaptiveBatchSizer batchSizer =
+                new AdaptiveBatchSizer(FAST_MODE_SINK_BATCH_ROWS, true, SHARD_PAGE_ROWS);
         ShardPagePlan pagePlan = new ShardPagePlan();
         TaskResumeJournal journal = TaskResumeJournal.open(context.taskId(), null);
         java.util.concurrent.ExecutorService pool = java.util.concurrent.Executors.newFixedThreadPool(workers,
@@ -1086,7 +1093,9 @@ public abstract class BaseExporter implements IExportStrategy {
             this.keyColumn = keyColumn;
             this.cursorLiteral = resumedCursor;
             this.resuming = resuming;
-            this.sizer = new AdaptiveBatchSizer(SINK_BATCH_ROWS, adaptiveSizing, SHARD_PAGE_ROWS);
+            this.sizer = new AdaptiveBatchSizer(
+                    adaptiveSizing ? FAST_MODE_SINK_BATCH_ROWS : SINK_BATCH_ROWS,
+                    adaptiveSizing, SHARD_PAGE_ROWS);
         }
 
         private List<KeyBound> bounds() {
@@ -1116,7 +1125,9 @@ public abstract class BaseExporter implements IExportStrategy {
         IValueProcessor valueProcessor = mode == ExportValueMode.NATIVE
                 ? Chat2DBContext.getDbMetaData().getValueProcessor() : null;
         List<List<Object>> batch = new ArrayList<>(SINK_BATCH_ROWS);
-        AdaptiveBatchSizer batchSizer = new AdaptiveBatchSizer(SINK_BATCH_ROWS, adaptiveSizing, SHARD_PAGE_ROWS);
+        AdaptiveBatchSizer batchSizer = new AdaptiveBatchSizer(
+                adaptiveSizing ? FAST_MODE_SINK_BATCH_ROWS : SINK_BATCH_ROWS,
+                adaptiveSizing, SHARD_PAGE_ROWS);
         int exportedRows = 0;
         try {
             sink.writeSchema(new ExportSchema(columnNames), tableName);

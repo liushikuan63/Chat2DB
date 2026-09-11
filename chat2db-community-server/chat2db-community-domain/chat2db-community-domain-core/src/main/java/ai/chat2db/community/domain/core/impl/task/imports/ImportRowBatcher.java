@@ -81,8 +81,14 @@ import java.util.concurrent.atomic.LongAdder;
 @Slf4j
 public final class ImportRowBatcher implements AutoCloseable {
 
-    /** Contract baseline of the fast mode: batches start at 20000 rows and may grow beyond it. */
-    private static final int DEFAULT_BATCH_ROWS = 20_000;
+    /**
+     * Standard-mode batch size: the historical value, untouched by the fast mode so the plain
+     * import path keeps behaving exactly as it did before.
+     */
+    private static final int DEFAULT_BATCH_ROWS = 500;
+
+    /** Fast-mode contract baseline: batches start at 20000 rows and may grow beyond it. */
+    private static final int FAST_MODE_BATCH_ROWS = 20_000;
 
     private static final int QUEUE_CAPACITY = 4;
 
@@ -122,7 +128,7 @@ public final class ImportRowBatcher implements AutoCloseable {
 
     private final ImportSqlExecutor sqlExecutor;
 
-    private final AdaptiveBatchSizer batchSizer = new AdaptiveBatchSizer(DEFAULT_BATCH_ROWS);
+    private final AdaptiveBatchSizer batchSizer;
 
     private final LongAdder importedCount = new LongAdder();
 
@@ -247,7 +253,9 @@ public final class ImportRowBatcher implements AutoCloseable {
         this.sqlBuilder = Chat2DBContext.getSqlBuilder();
         this.connectInfo = Chat2DBContext.getConnectInfo();
         this.standardMode = !TaskExecutionMode.isUltraFast(spec.getMode());
-        this.sqlExecutor = new ImportSqlExecutor(context);
+        this.sqlExecutor = new ImportSqlExecutor(context, !standardMode);
+        this.batchSizer = new AdaptiveBatchSizer(
+                standardMode ? DEFAULT_BATCH_ROWS : FAST_MODE_BATCH_ROWS);
         this.sourceIdentity = sourceIdentity(spec);
         this.resumeBelowRow = resolveResumeBelowRow(spec, context);
         if (resumeBelowRow > 0) {

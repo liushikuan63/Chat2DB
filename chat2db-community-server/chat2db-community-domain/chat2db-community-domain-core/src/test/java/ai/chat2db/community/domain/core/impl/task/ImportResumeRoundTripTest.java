@@ -268,8 +268,13 @@ class ImportResumeRoundTripTest {
     /** Simulates the crash window: rows above the watermark were applied but never recorded. */
     private void seedDurableRowsAboveWatermark(long watermarkRows, int count) throws Exception {
         try (Statement statement = connection.createStatement()) {
-            for (int id = (int) watermarkRows + 1; id <= watermarkRows + count; id++) {
+            int seeded = 0;
+            for (int id = (int) watermarkRows + 1; seeded < count; id++) {
+                if (id == POISON_ID) {
+                    continue;
+                }
                 statement.execute("INSERT INTO BULK_ROWS VALUES (" + id + ", 'durable-" + id + "')");
+                seeded++;
             }
         }
     }
