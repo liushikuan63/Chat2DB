@@ -63,8 +63,12 @@ class ImportResumeRoundTripTest {
     private static final String CHECKPOINT_INTERVAL_PROPERTY = "chat2db.task.import.checkpoint-interval";
     private static final String SNAPSHOT_INTERVAL_PROPERTY = "chat2db.task.import.snapshot-interval";
     private static final String H2_DRIVER_NAME = "import-resume-h2.jar";
-    private static final int ROWS = 5000;
-    private static final int POISON_ID = 1500;
+    // The fast-mode baseline batch is 20000 rows and the serial test path does not retune it, so
+    // the file spans six full batches and the poison row sits in the middle of the last batch:
+    // exactly the case an internally chunked batch would half-commit, which the import path must
+    // now avoid by executing every batch as one transaction.
+    private static final int ROWS = 120_000;
+    private static final int POISON_ID = 105_000;
 
     private static String previousUserHome;
 
@@ -115,8 +119,8 @@ class ImportResumeRoundTripTest {
         connection = DriverManager.getConnection("jdbc:h2:mem:resume_rt");
         try (Statement statement = connection.createStatement()) {
             statement.execute("CREATE TABLE BULK_ROWS (ID INT PRIMARY KEY, NAME VARCHAR(50))");
-            // The poison row duplicates CSV id 1500: a FAIL_FAST run aborts inside the batch that
-            // contains it, after the first committed batch has been checkpointed.
+            // The poison row duplicates a late CSV id: a FAIL_FAST run aborts inside the batch that
+            // contains it, after earlier committed batches have been checkpointed.
             statement.execute("INSERT INTO BULK_ROWS VALUES (" + POISON_ID + ", 'poison')");
         }
         ConnectInfo connectInfo = new ConnectInfo();
@@ -164,6 +168,8 @@ class ImportResumeRoundTripTest {
         // hosting state path); the Layer-2 storage watermark above carries the resume guarantee
         // and the journal file semantics are covered by TaskResumeJournalTest.
         assertEquals(1, countIds(POISON_ID), "only the pre-inserted poison row exists so far");
+        assertEquals(0, countRowsAboveWatermark(watermarkRows, POISON_ID),
+                "a failed batch must leave nothing behind: no row above the durable watermark may exist");
 
         // Run 2 (SKIP): resumes below the watermark, rejects the poison duplicate, finishes.
         new CSVImporter().run(csvSpec(csv, "SKIP"), contextFor());
@@ -227,6 +233,16 @@ class ImportResumeRoundTripTest {
     private int countIds(int id) throws Exception {
         try (Statement statement = connection.createStatement();
              ResultSet rows = statement.executeQuery("SELECT COUNT(*) FROM BULK_ROWS WHERE ID = " + id)) {
+            rows.next();
+            return rows.getInt(1);
+        }
+    }
+
+    /** Rows beyond the durable watermark, excluding the pre-inserted poison row. */
+    private int countRowsAboveWatermark(long watermark, int excludedId) throws Exception {
+        try (Statement statement = connection.createStatement();
+             ResultSet rows = statement.executeQuery("SELECT COUNT(*) FROM BULK_ROWS WHERE ID > "
+                     + watermark + " AND ID <> " + excludedId)) {
             rows.next();
             return rows.getInt(1);
         }

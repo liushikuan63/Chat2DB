@@ -199,7 +199,9 @@ class ImportRowBatcherParallelTest {
     @Test
     void parallelWorkersInsertEveryRowExactlyOnce() throws Exception {
         System.setProperty(PARALLELISM_PROPERTY, "4");
-        int rows = 2000;
+        // Enough rows that even the contract baseline batch (20000 rows) splits into many batches,
+        // so the assertion below observes real overlap instead of a single-batch edge case.
+        int rows = 200_000;
         String[] lines = new String[rows];
         for (int index = 0; index < rows; index++) {
             lines[index] = (index + 1) + ",name-" + (index + 1);
@@ -213,7 +215,9 @@ class ImportRowBatcherParallelTest {
         assertEquals(rows, ids.size(), "parallel import must not lose or duplicate rows");
         assertEquals(1, ids.get(0));
         assertEquals(rows, ids.get(rows - 1));
-        assertTrue(ImportRowBatcher.lastTuningSnapshot().peakInFlightBatches() > 1,
+        ImportRowBatcher.ImportTuningSnapshot tuning = ImportRowBatcher.lastTuningSnapshot();
+        assertTrue(tuning.batches() > 1, "the import must be split into several batches");
+        assertTrue(tuning.peakInFlightBatches() > 1,
                 "the producer must have more than one submitted batch in flight");
     }
 

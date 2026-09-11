@@ -35,9 +35,10 @@ public final class AdaptiveConcurrencyGate extends Semaphore {
 
     /**
      * Hard floor of the fan-out; a gate created below it can still grow, but tuning never shrinks
-     * it past this bound (bounded by the configured max when that is smaller).
+     * it past this bound (bounded by the configured max when that is smaller). One permit is the
+     * contract floor of the fast mode, so the fan-out never reaches zero.
      */
-    static final int MIN_PERMITS = 2;
+    static final int MIN_PERMITS = 1;
 
     /** Minimum spacing between source-pressure cuts so one slow page cannot crash the fan-out. */
     private static final long PRESSURE_CUT_SPACING_NANOS = 1_000_000_000L;
@@ -179,5 +180,13 @@ public final class AdaptiveConcurrencyGate extends Semaphore {
 
     int currentPermits() {
         return availablePermits();
+    }
+
+    /**
+     * Permits currently in circulation; callers that own growable worker capacity compare it with
+     * the number of live workers to decide whether more workers are needed.
+     */
+    public int totalPermits() {
+        return totalPermits.get();
     }
 }

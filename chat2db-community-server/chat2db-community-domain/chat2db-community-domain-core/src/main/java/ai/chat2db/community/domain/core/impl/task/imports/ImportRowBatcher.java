@@ -52,6 +52,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.ArrayBlockingQueue;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.ConcurrentSkipListMap;
 import java.util.stream.Stream;
@@ -62,12 +63,14 @@ import java.util.concurrent.atomic.LongAdder;
  * With {@code onError=SKIP} a failing row is retried individually and recorded in a
  * {@code REJECT}-role NDJSON sub-artifact instead of aborting the task.
  *
- * <p>Parallel execution: the worker count resolves from the
- * {@code chat2db.task.import.parallelism} system property ({@code 0}, the default, picks the
- * adaptive band {@code [2, min(16, CPU cores)]}, {@code 1} forces the serial path, and explicit
- * values are clamped into the band), finished batches are handed to
- * partitioned queues so batch {@code n} is always executed before batch {@code n + workerCount}:
- * per worker the order is strict, while workers run in parallel. The number of <em>active</em>
+ * <p>Parallel execution starts at the fast-mode contract baseline of {@code 4} workers and
+ * {@code 20000} rows per batch, shrinks to at most {@code 1} worker and {@code 100} rows when the
+ * target is slow, and grows in steps while the measured throughput keeps improving - there is no
+ * configured upper bound, the database feedback is the ceiling. The
+ * {@code chat2db.task.import.parallelism} system property overrides the fan-out
+ * ({@code 1} forces the serial path, a larger value pins the worker count). Finished batches are
+ * handed to partitioned queues: per worker the order is strict, while workers run in parallel, and
+ * the queue set grows together with the adaptive gate. The number of <em>active</em>
  * workers and the batch size are self-tuning (see {@link AdaptiveConcurrencyGate} and
  * {@link AdaptiveBatchSizer}), so the pipeline converges to the throughput the target database
  * actually sustains. Rows have no ordering constraints, so inter-worker interleaving is safe; the
@@ -76,12 +79,13 @@ import java.util.concurrent.atomic.LongAdder;
 @Slf4j
 public final class ImportRowBatcher implements AutoCloseable {
 
-    private static final int DEFAULT_BATCH_ROWS = 500;
+    /** Contract baseline of the fast mode: batches start at 20000 rows and may grow beyond it. */
+    private static final int DEFAULT_BATCH_ROWS = 20_000;
 
     private static final int QUEUE_CAPACITY = 4;
 
-    /** Upper bound of the adaptive worker band, also capped by the machine's CPU count. */
-    private static final int MAX_WORKERS = 16;
+    /** Contract baseline fan-out of the fast mode; the adaptive gate grows it further on demand. */
+    private static final int BASE_WORKERS = 4;
 
     /** How long a worker waits for an adaptive gate permit before degrading to ungated execution. */
     private static final long GATE_WAIT_MILLIS = 30_000L;
@@ -127,11 +131,15 @@ public final class ImportRowBatcher implements AutoCloseable {
     private long rejectedRowCount;
 
     // --- parallel-execution state, null on the serial path ---
-    private final int workerCount;
+    private volatile int workerCount;
 
     private final List<BlockingQueue<PendingBatch>> queues;
 
     private final ExecutorService workerPool;
+
+    private final Object workerGrowthLock = new Object();
+
+    private final AtomicBoolean closing = new AtomicBoolean();
 
     private final AdaptiveConcurrencyGate gate;
 
@@ -214,12 +222,15 @@ public final class ImportRowBatcher implements AutoCloseable {
         ExecutorService builtPool = null;
         if (requestedWorkers > 1) {
             try {
-                builtQueues = new ArrayList<>(requestedWorkers);
+                builtQueues = new CopyOnWriteArrayList<>();
                 for (int index = 0; index < requestedWorkers; index++) {
                     builtQueues.add(new ArrayBlockingQueue<>(QUEUE_CAPACITY));
                 }
-                builtGate = AdaptiveConcurrencyGate.create(2, requestedWorkers);
-                builtPool = Executors.newFixedThreadPool(requestedWorkers, runnable -> {
+                // No configured ceiling: the AIMD tuning is the only authority on the fan-out and
+                // the batcher grows its worker pool to match what the target database sustains.
+                builtGate = AdaptiveConcurrencyGate.create(Math.min(BASE_WORKERS, requestedWorkers),
+                        Integer.MAX_VALUE);
+                builtPool = Executors.newCachedThreadPool(runnable -> {
                     Thread thread = new Thread(runnable, "chat2db-import-" + context.taskId());
                     thread.setDaemon(true);
                     return thread;
@@ -248,7 +259,7 @@ public final class ImportRowBatcher implements AutoCloseable {
                 this.workerPool.execute(() -> runWorker(workerIndex));
             }
         }
-        warnIfSelfReferencing(spec, this.workerCount > 1);
+        warnIfSelfReferencing(spec, this.workerPool != null);
     }
 
     public void accept(long fileRowNumber, List<String> fileValues) {
@@ -338,7 +349,7 @@ public final class ImportRowBatcher implements AutoCloseable {
             context.checkCancelled();
             throwIfFailed();
             flushBufferedBatch();
-            if (workerCount > 1) {
+            if (workerPool != null) {
                 awaitQuiesce();
             }
         } catch (RuntimeException taskFailure) {
@@ -365,7 +376,7 @@ public final class ImportRowBatcher implements AutoCloseable {
 
     private void executeBatch(PendingBatch batch) {
         inFlightFirstRows.put(batch.seq(), batch.firstRowNumber());
-        if (workerCount > 1) {
+        if (workerPool != null) {
             submitBatch(batch);
         } else {
             executeWithTolerance(batch);
@@ -413,7 +424,7 @@ public final class ImportRowBatcher implements AutoCloseable {
                 inFlightFirstRows.remove(batch.seq());
                 maybeCheckpoint();
             }
-            if (workerCount > 1) {
+            if (workerPool != null) {
                 batchCompleted();
             }
         }
@@ -466,20 +477,44 @@ public final class ImportRowBatcher implements AutoCloseable {
         if (StringUtils.isBlank(connectInfo.getUrl())) {
             return 1;
         }
-        int cores = Math.max(1, Runtime.getRuntime().availableProcessors());
-        int ceiling = Math.max(2, Math.min(MAX_WORKERS, cores));
         int configured = Integer.getInteger("chat2db.task.import.parallelism", 0);
         if (configured == 1) {
             return 1;
         }
         if (configured > 1) {
-            return Math.max(2, Math.min(ceiling, configured));
+            return configured;
         }
-        return ceiling;
+        return BASE_WORKERS;
+    }
+
+    /**
+     * Grows the live worker set to match the adaptive gate: once the AIMD tuning admits more
+     * concurrent batches than there are workers, another queue/worker pair is added. Growth is
+     * unbounded by contract; the throughput feedback inside the gate is the only ceiling, so the
+     * pool ends up exactly as wide as this machine and target database sustain.
+     */
+    private void ensureWorkerCapacity() {
+        AdaptiveConcurrencyGate liveGate = gate;
+        if (liveGate == null || closing.get()) {
+            return;
+        }
+        int target = liveGate.totalPermits();
+        synchronized (workerGrowthLock) {
+            if (closing.get()) {
+                return;
+            }
+            while (workerCount < target) {
+                int index = workerCount;
+                queues.add(new ArrayBlockingQueue<>(QUEUE_CAPACITY));
+                workerPool.execute(() -> runWorker(index));
+                workerCount = index + 1;
+            }
+        }
     }
 
     private void submitBatch(PendingBatch batch) {
         throwIfFailed();
+        ensureWorkerCapacity();
         int inFlight = inFlightBatches.incrementAndGet();
         peakInFlightBatches.accumulateAndGet(inFlight, Math::max);
         BlockingQueue<PendingBatch> queue = queues.get((int) (batch.seq() % workerCount));
@@ -866,6 +901,7 @@ public final class ImportRowBatcher implements AutoCloseable {
             }
         } finally {
             if (workerPool != null) {
+                closing.set(true);
                 for (BlockingQueue<PendingBatch> queue : queues) {
                     while (!queue.offer(END_OF_QUEUE)) {
                         if (aborted.get()) {

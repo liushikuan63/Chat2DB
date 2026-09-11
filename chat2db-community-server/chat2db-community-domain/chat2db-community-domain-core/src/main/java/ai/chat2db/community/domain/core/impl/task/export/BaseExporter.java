@@ -78,9 +78,10 @@ public abstract class BaseExporter implements IExportStrategy {
     public static final int EXPORT_BATCH_ROWS = 1000;
 
     /**
-     * Rows handed to a {@link FormatSink} per batch.
+     * Rows handed to a {@link FormatSink} per batch: the fast-mode contract baseline of 20000 rows,
+     * which the adaptive sizer may grow further (down to 100) as the target sustains it.
      */
-    public static final int SINK_BATCH_ROWS = 500;
+    public static final int SINK_BATCH_ROWS = 20_000;
 
     /**
      * Resume-state kind written by the checkpointed export path.
@@ -98,10 +99,11 @@ public abstract class BaseExporter implements IExportStrategy {
     private static final Object SHARD_END = new Object();
 
     /**
-     * Shards per table export. Defaults to an automatic cap of {@code min(16, cores)}; set the
+     * Shards per table export. Defaults to {@code max(16, cores * 4)}, i.e. the plan is sized from
+     * the machine and the key range rather than a small constant; set the
      * {@code chat2db.task.shard.max-parallelism} property explicitly to pin or disable (1) the
-     * fan-out. Unmanaged instantiation keeps 1, the single-cursor path. The active fan-out always
-     * starts at 2 and is tuned inside [2, workers] by the adaptive gate.
+     * fan-out. Unmanaged instantiation keeps 1, the single-cursor path. The active fan-out starts
+     * at the fast-mode baseline of 4 and is tuned inside [1, workers] by the adaptive gate.
      */
     @org.springframework.beans.factory.annotation.Value("${chat2db.task.shard.max-parallelism:0}")
     private int shardMaxParallelism = 1;
@@ -401,13 +403,14 @@ public abstract class BaseExporter implements IExportStrategy {
      * adaptive ceiling).
      */
     private static final java.util.concurrent.Semaphore SHARD_GATE = new java.util.concurrent.Semaphore(
-            Integer.getInteger("chat2db.task.shard.total-parallelism", 16));
+            Integer.getInteger("chat2db.task.shard.total-parallelism",
+                    Math.max(16, Runtime.getRuntime().availableProcessors() * 4)));
 
     private boolean tryShardExport(ExportTaskSpec spec, String tableName, TaskExecutionContext context,
             OutputStream output, SinkFactory sinkFactory, ExportValueMode mode,
             SqlExecutionPlan executionPlan, ExportProgressLogger progressLogger) {
         int configuredMax = shardMaxParallelism > 0 ? shardMaxParallelism
-                : Math.min(16, Runtime.getRuntime().availableProcessors());
+                : Math.max(16, Runtime.getRuntime().availableProcessors() * 4);
         // SQL dumps shard too: rows are converted to dialect literals on the shard threads and
         // the ordered drain keeps the statements in key order, so the artifact carries the same
         // content as the single-cursor dump while reading with the adaptive fan-out.
@@ -452,9 +455,10 @@ public abstract class BaseExporter implements IExportStrategy {
             throw new IllegalStateException("SQL export has no authorized columns");
         }
         FormatSink sink = sinkFactory.create(output, spec, tableName, false);
-        // Active fan-out is self-tuned inside [2, workers]: the merge loop below submits shards
-        // only while the gate admits, and the fixed pool only bounds the threads.
-        AdaptiveConcurrencyGate gate = AdaptiveConcurrencyGate.create(2, workers);
+        // Active fan-out self-tunes inside [1, workers] starting from the fast-mode baseline of 4:
+        // the merge loop below submits shards only while the gate admits, and the fixed pool only
+        // bounds the threads.
+        AdaptiveConcurrencyGate gate = AdaptiveConcurrencyGate.create(Math.min(4, workers), workers);
         AdaptiveBatchSizer batchSizer = new AdaptiveBatchSizer(SINK_BATCH_ROWS);
         ShardPagePlan pagePlan = new ShardPagePlan();
         TaskResumeJournal journal = TaskResumeJournal.open(context.taskId(), null);

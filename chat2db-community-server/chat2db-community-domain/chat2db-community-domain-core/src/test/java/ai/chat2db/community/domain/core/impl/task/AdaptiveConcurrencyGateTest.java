@@ -77,7 +77,7 @@ class AdaptiveConcurrencyGateTest {
         tune(gate, 40);
         tune(gate, 80);
         tune(gate, 100);
-        assertEquals(2, gate.currentPermits(), "the fan-out must never drop below the floor");
+        assertEquals(1, gate.currentPermits(), "the fan-out must never drop below the floor");
     }
 
     @Test
@@ -103,7 +103,7 @@ class AdaptiveConcurrencyGateTest {
         assertEquals(3, gate.currentPermits(), "a slow page cuts a quarter of the fan-out");
         AdaptiveConcurrencyGate floored = AdaptiveConcurrencyGate.create(2, 4);
         floored.reduceForSourcePressure();
-        assertEquals(2, floored.currentPermits(), "the floor holds under source pressure");
+        assertEquals(1, floored.currentPermits(), "the floor holds under source pressure");
     }
 
     @Test
