@@ -63,6 +63,8 @@ export interface IImportOptions {
   columnMappings?: IImportColumnMapping[];
   onError?: 'ABORT' | 'SKIP';
   maxErrors?: number;
+  /** How a resumed run treats rows an earlier run already applied; absent keeps RECONCILE. */
+  resumeDuplicatePolicy?: 'RECONCILE' | 'REJECT' | 'FAIL';
 }
 
 /** Execution mode of bulk import/export tasks; absent resolves to STANDARD on the backend. */

@@ -20,6 +20,7 @@ export interface ImportExportFormValue {
   nullString?: string;
   onError?: 'ABORT' | 'SKIP';
   maxErrors?: number;
+  resumeDuplicatePolicy?: 'RECONCILE' | 'REJECT' | 'FAIL';
   unmappedTarget?: 'DEFAULT' | 'NULL';
 }
 
@@ -108,6 +109,9 @@ export function buildTaskParams({
                 onError: formValue.onError || undefined,
                 maxErrors: formValue.onError === 'SKIP' ? formValue.maxErrors || undefined : undefined,
               }
+            : {}),
+          ...(formValue.resumeDuplicatePolicy
+            ? { resumeDuplicatePolicy: formValue.resumeDuplicatePolicy }
             : {}),
           ...(mappingList ? { columnMappings: mappingList } : {}),
         };

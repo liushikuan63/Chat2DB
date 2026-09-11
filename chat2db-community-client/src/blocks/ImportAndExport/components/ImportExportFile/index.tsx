@@ -411,6 +411,20 @@ const ImportExportFile = forwardRef((props: IProps, ref: ForwardedRef<ImportExpo
               <InputNumber min={1} style={{ width: '100%' }} />
             </Form.Item>
           )}
+          <Form.Item
+            label={`${i18n('workspace.importExport.resumeDuplicatePolicy')}:`}
+            name="resumeDuplicatePolicy"
+          >
+            <Select
+              allowClear
+              placeholder={i18n('workspace.importExport.resumeDuplicateReconcile')}
+              options={[
+                { label: i18n('workspace.importExport.resumeDuplicateReconcile'), value: 'RECONCILE' },
+                { label: i18n('workspace.importExport.resumeDuplicateReject'), value: 'REJECT' },
+                { label: i18n('workspace.importExport.resumeDuplicateFail'), value: 'FAIL' },
+              ]}
+            />
+          </Form.Item>
         </>
       )}
       {isImport && importError && <Alert type="error" showIcon message={importError} />}
