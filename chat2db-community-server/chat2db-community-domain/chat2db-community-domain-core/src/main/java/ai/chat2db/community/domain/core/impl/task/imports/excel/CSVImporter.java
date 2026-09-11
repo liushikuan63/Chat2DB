@@ -55,6 +55,7 @@ public class CSVImporter extends BaseImporter implements IImportStrategy {
                 batcher[0].flush();
                 context.logInfo("IMPORT_SUMMARY", "CSV import finished", Map.of(
                         "importedRows", batcher[0].importedRows(),
+                        "alreadyAppliedRows", batcher[0].reconciledRows(),
                         "rejectedRows", batcher[0].rejectedRows()));
             }
         } catch (RuntimeException failure) {

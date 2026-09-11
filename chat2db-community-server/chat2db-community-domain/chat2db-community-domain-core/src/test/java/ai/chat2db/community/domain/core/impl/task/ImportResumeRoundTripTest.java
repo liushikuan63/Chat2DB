@@ -7,6 +7,7 @@ import ai.chat2db.community.domain.api.model.task.ImportColumnMapping;
 import ai.chat2db.community.domain.api.model.task.ImportOptions;
 import ai.chat2db.community.domain.api.model.task.ImportTaskSpec;
 import ai.chat2db.community.domain.api.model.task.ResumeState;
+import ai.chat2db.community.domain.api.model.task.ResumeDuplicatePolicy;
 import ai.chat2db.community.domain.api.model.task.Task;
 import ai.chat2db.community.domain.api.model.task.TaskArtifact;
 import ai.chat2db.community.domain.api.model.task.TaskEvent;
@@ -18,6 +19,7 @@ import ai.chat2db.community.domain.api.model.task.TaskTargetSnapshot;
 import ai.chat2db.community.domain.api.service.task.TaskStorage;
 import ai.chat2db.community.domain.core.impl.task.imports.excel.CSVImporter;
 import ai.chat2db.community.domain.core.impl.task.imports.ImportColumnResolver;
+import ai.chat2db.community.domain.core.impl.task.imports.ImportRowBatcher;
 import ai.chat2db.community.tools.constant.JdbcDriverConstants;
 import ai.chat2db.spi.DefaultMetaService;
 import ai.chat2db.spi.IDbMetaData;
@@ -200,6 +202,116 @@ class ImportResumeRoundTripTest {
         assertEquals(ROWS, countRows(), "the import itself must still land every row");
     }
 
+    /**
+     * A resume must reconcile rows an earlier run already applied: they are screened in their own
+     * event, never charged against {@code maxErrors}, and the import completes.
+     */
+    @Test
+    void reconcileAbsorbsRowsAnEarlierRunAlreadyApplied() throws Exception {
+        Path csv = writeCsv();
+        long watermarkRows = abortFirstRunAtPoisonRow(csv);
+        seedDurableRowsAboveWatermark(watermarkRows, 500);
+
+        new CSVImporter().run(csvSpec(csv, "SKIP", 100, ResumeDuplicatePolicy.RECONCILE), contextFor());
+
+        ImportRowBatcher.ImportTuningSnapshot tuning = ImportRowBatcher.lastTuningSnapshot();
+        assertTrue(tuning.alreadyAppliedRows() >= 500,
+                "already applied rows must be reconciled, got " + tuning.alreadyAppliedRows());
+        assertEquals(0, tuning.rejectedRows(), "reconciled rows must not be charged as rejections");
+        assertEquals(ROWS, countRows(), "the resume must not duplicate rows");
+        assertEquals(ROWS, countDistinctIds());
+        assertTrue(storage.events.stream()
+                        .anyMatch(event -> "IMPORT_ROW_ALREADY_APPLIED".equals(event.getCode())),
+                "already applied rows must be screened with their own event");
+    }
+
+    /** The historical behaviour stays available: already applied rows count against maxErrors. */
+    @Test
+    void rejectPolicyStillCountsAlreadyAppliedRowsAgainstMaxErrors() throws Exception {
+        Path csv = writeCsv();
+        long watermarkRows = abortFirstRunAtPoisonRow(csv);
+        seedDurableRowsAboveWatermark(watermarkRows, 500);
+
+        new CSVImporter().run(csvSpec(csv, "SKIP", 10_000, ResumeDuplicatePolicy.REJECT), contextFor());
+
+        ImportRowBatcher.ImportTuningSnapshot tuning = ImportRowBatcher.lastTuningSnapshot();
+        assertTrue(tuning.rejectedRows() >= 500, "REJECT keeps the historical counting");
+        assertEquals(0, tuning.alreadyAppliedRows(), "nothing is reconciled under REJECT");
+    }
+
+    /** FAIL aborts the resume on the first already applied row, even in SKIP mode. */
+    @Test
+    void failPolicyAbortsOnAlreadyAppliedRows() throws Exception {
+        Path csv = writeCsv();
+        long watermarkRows = abortFirstRunAtPoisonRow(csv);
+        seedDurableRowsAboveWatermark(watermarkRows, 100);
+
+        assertThrows(TaskExecutionException.class,
+                () -> new CSVImporter().run(csvSpec(csv, "SKIP", 10_000, ResumeDuplicatePolicy.FAIL),
+                        contextFor()),
+                "FAIL must abort even though the run would otherwise skip the row");
+    }
+
+    /** Runs the FAIL_FAST import that aborts on the poison row and returns its durable watermark. */
+    private long abortFirstRunAtPoisonRow(Path csv) {
+        assertThrows(TaskExecutionException.class,
+                () -> new CSVImporter().run(csvSpec(csv, "FAIL_FAST"), contextFor()),
+                "the poison row must abort the first run");
+        long watermarkRows = storage.resumeStates.stream()
+                .filter(state -> state.getRowsDone() != null)
+                .mapToLong(ResumeState::getRowsDone)
+                .max().orElse(0L);
+        assertTrue(watermarkRows > 0, "the aborted run must leave a durable watermark");
+        return watermarkRows;
+    }
+
+    /** Simulates the crash window: rows above the watermark were applied but never recorded. */
+    private void seedDurableRowsAboveWatermark(long watermarkRows, int count) throws Exception {
+        try (Statement statement = connection.createStatement()) {
+            for (int id = (int) watermarkRows + 1; id <= watermarkRows + count; id++) {
+                statement.execute("INSERT INTO BULK_ROWS VALUES (" + id + ", 'durable-" + id + "')");
+            }
+        }
+    }
+
+    /**
+     * Bisection screening: a batch with several bad rows is split down to the offending rows, each
+     * one is recorded with its own cause and line, and every healthy row is still imported.
+     */
+    @Test
+    void isolationRecordsEachBadRowAndKeepsHealthyRows() throws Exception {
+        Path csv = writeCsv();
+        List<Integer> badIds = List.of(10, 50, 90);
+        try (Statement statement = connection.createStatement()) {
+            for (int id : badIds) {
+                statement.execute("INSERT INTO BULK_ROWS VALUES (" + id + ", 'existing-" + id + "')");
+            }
+        }
+        // The shared fixture also pre-inserts the poison id, so the file collides on four rows.
+        List<Long> expectedRows = java.util.stream.Stream
+                .concat(badIds.stream().map(id -> (long) id + 1), java.util.stream.Stream.of((long) POISON_ID + 1))
+                .sorted()
+                .toList();
+        long expectedRejects = expectedRows.size();
+
+        new CSVImporter().run(csvSpec(csv, "SKIP", 10, ResumeDuplicatePolicy.RECONCILE), contextFor());
+
+        ImportRowBatcher.ImportTuningSnapshot tuning = ImportRowBatcher.lastTuningSnapshot();
+        List<Long> screenedRows = storage.events.stream()
+                .filter(event -> "IMPORT_ROW_REJECTED".equals(event.getCode()))
+                .map(event -> event.getDetails() == null ? null : event.getDetails().get("row"))
+                .filter(java.util.Objects::nonNull)
+                .map(value -> Long.valueOf(String.valueOf(value)))
+                .sorted()
+                .toList();
+        assertEquals(expectedRows, screenedRows, "screening must name the exact rows that failed");
+        assertEquals(expectedRejects, tuning.rejectedRows(),
+                "every isolated bad row must be recorded exactly once");
+        assertEquals(ROWS - expectedRejects, tuning.rows(),
+                "healthy rows must be imported even though their batch failed");
+        assertEquals(ROWS, countRows(), "the target must hold every id exactly once");
+    }
+
     private Path writeCsv() throws Exception {
         Path csv = tempDirectory.resolve("resume.csv");
         StringBuilder content = new StringBuilder("ID,NAME\n");
@@ -211,6 +323,11 @@ class ImportResumeRoundTripTest {
     }
 
     private ImportTaskSpec csvSpec(Path csv, String onError) {
+        return csvSpec(csv, onError, 100, null);
+    }
+
+    private ImportTaskSpec csvSpec(Path csv, String onError, Integer maxErrors,
+            ResumeDuplicatePolicy policy) {
         return ImportTaskSpec.builder()
                 .taskType("DATA_FILE_IMPORT")
                 .sourceFile(csv.toString())
@@ -220,7 +337,8 @@ class ImportResumeRoundTripTest {
                         .charset("UTF-8")
                         .delimiter(",")
                         .onError(onError)
-                        .maxErrors(100)
+                        .maxErrors(maxErrors)
+                        .resumeDuplicatePolicy(policy)
                         .columnMappings(List.of(
                                 new ImportColumnMapping("ID", "ID"),
                                 new ImportColumnMapping("NAME", "NAME")))

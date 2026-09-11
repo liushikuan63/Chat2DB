@@ -5,6 +5,7 @@ import ai.chat2db.community.domain.api.model.metadata.TableColumn;
 import ai.chat2db.community.domain.api.model.task.CsvOptions;
 import ai.chat2db.community.domain.api.model.task.ImportOptions;
 import ai.chat2db.community.domain.api.model.task.ImportTaskSpec;
+import ai.chat2db.community.domain.api.model.task.ResumeDuplicatePolicy;
 import ai.chat2db.community.domain.api.model.task.ResumeState;
 import ai.chat2db.community.domain.api.model.task.TaskCancelledException;
 import ai.chat2db.community.domain.api.model.task.TaskErrorCode;
@@ -97,6 +98,12 @@ public final class ImportRowBatcher implements AutoCloseable {
 
     private static final String REJECT_ROLE = "REJECT";
 
+    /**
+     * Sub-artifact listing rows a resumed run found already applied: the screening record that
+     * keeps reconciliation auditable even though it is not an error.
+     */
+    private static final String RECONCILED_ROLE = "RECONCILED";
+
     private final ImportTaskSpec spec;
 
     private final TaskExecutionContext context;
@@ -128,6 +135,17 @@ public final class ImportRowBatcher implements AutoCloseable {
     private final List<Long> bufferedRowNumbers = new ArrayList<>(DEFAULT_BATCH_ROWS);
 
     private BufferedWriter rejectWriter;
+
+    private BufferedWriter reconciledWriter;
+
+    /** Rows a resumed run skipped because an earlier run had already applied them. */
+    private final LongAdder reconciledCount = new LongAdder();
+
+    /**
+     * Resolved policy for duplicate-key rows on a resumed run; {@code null} in the options keeps
+     * RECONCILE, so a resume finishes instead of replaying durable rows into rejections.
+     */
+    private final ResumeDuplicatePolicy resumeDuplicatePolicy;
 
     private long rejectedRowCount;
 
@@ -222,6 +240,8 @@ public final class ImportRowBatcher implements AutoCloseable {
         this.context = context;
         this.resolution = resolution;
         this.options = spec.getOptions() == null ? new ImportOptions() : spec.getOptions();
+        this.resumeDuplicatePolicy = this.options.getResumeDuplicatePolicy() == null
+                ? ResumeDuplicatePolicy.RECONCILE : this.options.getResumeDuplicatePolicy();
         this.csvOptions = spec.getCsvOptions() == null ? null : spec.getCsvOptions().validate();
         this.valueProcessor = valueProcessor;
         this.sqlBuilder = Chat2DBContext.getSqlBuilder();
@@ -331,6 +351,11 @@ public final class ImportRowBatcher implements AutoCloseable {
         return importedCount.sum();
     }
 
+    /** Rows a resumed run reconciled as already applied (screening count, never an error). */
+    public long reconciledRows() {
+        return reconciledCount.sum();
+    }
+
     public long rejectedRows() {
         synchronized (rejectLock) {
             return rejectedRowCount;
@@ -358,7 +383,8 @@ public final class ImportRowBatcher implements AutoCloseable {
      * last closed batcher wins when several imports run at once.
      */
     public record ImportTuningSnapshot(int workers, long batches, long rows, long nanos,
-            int batchSize, int gatePermits, int peakInFlightBatches) { }
+            int batchSize, int gatePermits, int peakInFlightBatches, long alreadyAppliedRows,
+            long rejectedRows) { }
 
     private static final AtomicReference<ImportTuningSnapshot> LAST_TUNING = new AtomicReference<>();
 
@@ -425,15 +451,33 @@ public final class ImportRowBatcher implements AutoCloseable {
             } catch (TaskCancelledException cancellation) {
                 throw cancellation;
             } catch (RuntimeException batchFailure) {
-                context.logError("IMPORT_BATCH_FAILED", "Could not import batch", Map.of(
-                        "statementCount", rows,
-                        "message", StringUtils.defaultString(batchFailure.getMessage())));
-                if (!isSkipMode()) {
+                boolean reconcileFailure = shouldReconcile(batchFailure);
+                if (!isSkipMode() && !reconcileFailure) {
+                    // ABORT mode keeps its semantics: nothing of the failed batch is applied, and
+                    // the error names the range so the offending rows can be located in the file.
+                    context.logError("IMPORT_BATCH_FAILED", "Could not import batch", Map.of(
+                            "statementCount", rows,
+                            "firstRow", batch.firstRowNumber(),
+                            "message", StringUtils.defaultString(batchFailure.getMessage())));
                     throw batchFailure;
                 }
-                // In SKIP mode every row ends handled (imported or recorded in the reject file),
-                // so the watermark may advance past the batch once the replay finishes.
-                replayIndividually(batch);
+                if (reconcileFailure) {
+                    context.logWarn("IMPORT_BATCH_RECONCILED",
+                            "Import batch collided with already applied rows; classifying them",
+                            Map.of("statementCount", rows,
+                                    "firstRow", batch.firstRowNumber(),
+                                    "message", StringUtils.defaultString(batchFailure.getMessage())));
+                } else {
+                    context.logError("IMPORT_BATCH_FAILED", "Could not import batch", Map.of(
+                            "statementCount", rows,
+                            "firstRow", batch.firstRowNumber(),
+                            "message", StringUtils.defaultString(batchFailure.getMessage())));
+                }
+                // Bisect the failed batch: healthy halves are applied as batches again, offending
+                // rows are isolated row by row with their own cause. Every row ends handled
+                // (imported, reconciled or recorded in the reject file), so the watermark may
+                // advance past the batch.
+                isolateBatchFailures(batch);
                 fullyHandled = true;
             }
         } finally {
@@ -456,19 +500,79 @@ public final class ImportRowBatcher implements AutoCloseable {
         }
     }
 
-    /** Retries a failed batch row by row so genuinely bad rows can be skipped. */
-    private void replayIndividually(PendingBatch batch) {
-        for (int index = 0; index < batch.sqls().size(); index++) {
-            try {
-                sqlExecutor.executeBatch(List.of(batch.sqls().get(index)));
-                importedCount.increment();
-            } catch (RuntimeException rowFailure) {
-                if (isConnectionFailure(rowFailure)) {
-                    throw rowFailure;
-                }
-                handleRejectedRow(batch.rowNumbers().get(index), batch.rows().get(index),
-                        rootMessage(rowFailure));
+    /**
+     * Locates the rows of a failed batch by repeated bisection: a half that executes cleanly is
+     * applied as one batch again, a half that still fails is split further until the offending
+     * rows stand alone. Each of them is recorded with its own cause (rejected, or reconciled as
+     * already applied on a resume) and the import continues, so k bad rows cost O(k log n)
+     * executions instead of replaying every row of the batch one by one.
+     */
+    private void isolateBatchFailures(PendingBatch batch) {
+        List<String> sqls = batch.sqls();
+        isolateRange(sqls, batch.rows(), batch.rowNumbers(), 0, sqls.size());
+    }
+
+    private void isolateRange(List<String> sqls, List<String> rows, List<Long> rowNumbers,
+            int from, int to) {
+        if (from >= to) {
+            return;
+        }
+        if (to - from == 1) {
+            retryIsolatedRow(sqls.get(from), rows.get(from), rowNumbers.get(from));
+            return;
+        }
+        int mid = (from + to) >>> 1;
+        if (tryExecuteRange(sqls, from, mid)) {
+            importedCount.add(mid - from);
+        } else {
+            isolateRange(sqls, rows, rowNumbers, from, mid);
+        }
+        if (tryExecuteRange(sqls, mid, to)) {
+            importedCount.add(to - mid);
+        } else {
+            isolateRange(sqls, rows, rowNumbers, mid, to);
+        }
+    }
+
+    /** Runs one range as a batch; a clean range is applied, a failing range is split further. */
+    private boolean tryExecuteRange(List<String> sqls, int from, int to) {
+        context.checkCancelled();
+        try {
+            sqlExecutor.executeBatch(sqls.subList(from, to));
+            return true;
+        } catch (TaskCancelledException cancellation) {
+            throw cancellation;
+        } catch (RuntimeException rangeFailure) {
+            if (isConnectionFailure(rangeFailure)) {
+                throw rangeFailure;
             }
+            return false;
+        }
+    }
+
+    /** Records one row that a bisection isolated, honouring the resume duplicate policy. */
+    private void retryIsolatedRow(String sql, String rawRow, Long fileRowNumber) {
+        try {
+            sqlExecutor.executeBatch(List.of(sql));
+            // A row that only failed inside a larger batch is healthy on its own.
+            importedCount.increment();
+            return;
+        } catch (TaskCancelledException cancellation) {
+            throw cancellation;
+        } catch (RuntimeException rowFailure) {
+            if (isConnectionFailure(rowFailure)) {
+                throw rowFailure;
+            }
+            if (shouldReconcile(rowFailure)) {
+                recordAlreadyApplied(fileRowNumber, rawRow, rootMessage(rowFailure));
+                return;
+            }
+            if (shouldFailOnApplied(rowFailure)) {
+                throw new TaskExecutionException(TaskErrorCode.IMPORT_FAILED.name(),
+                        "Import row was already applied by an earlier run: "
+                                + StringUtils.defaultString(rootMessage(rowFailure)));
+            }
+            handleRejectedRow(fileRowNumber, rawRow, rootMessage(rowFailure));
         }
     }
 
@@ -849,6 +953,86 @@ public final class ImportRowBatcher implements AutoCloseable {
         handleRejectedRow(null, rawRow, rootMessage(failure));
     }
 
+    /**
+     * Records a row that an earlier run had already applied. This is deliberately not an error:
+     * it is counted separately, written to its own artifact for screening, and never charged
+     * against {@code maxErrors}, so a resume finishes instead of aborting on its own durable rows.
+     */
+    private void recordAlreadyApplied(Long fileRowNumber, String rawRow, String reason) {
+        synchronized (rejectLock) {
+            reconciledCount.increment();
+            try {
+                reconciledWriter().write(JSON.toJSONString(Map.of(
+                        "row", fileRowNumber == null ? -1L : fileRowNumber,
+                        "line", rawRow,
+                        "reason", reason == null ? "unknown" : reason)));
+                reconciledWriter().write("\n");
+            } catch (IOException e) {
+                throw new UncheckedIOException("Could not write reconciled rows file", e);
+            }
+        }
+        context.logInfo("IMPORT_ROW_ALREADY_APPLIED", "Import row already applied by an earlier run",
+                Map.of("row", fileRowNumber == null ? -1L : fileRowNumber,
+                        "alreadyAppliedRows", reconciledRows()));
+    }
+
+    /**
+     * Whether a failure is this run colliding with a row an earlier run already applied: only a
+     * resumed run reconciles, and only duplicate/unique-key violations qualify. {@code REJECT}
+     * keeps the historical counting and {@code FAIL} aborts.
+     */
+    private boolean shouldReconcile(Throwable failure) {
+        return isResumedDuplicate(failure) && resumeDuplicatePolicy == ResumeDuplicatePolicy.RECONCILE;
+    }
+
+    /** {@code FAIL} aborts on an already-applied row even when the run would otherwise skip it. */
+    private boolean shouldFailOnApplied(Throwable failure) {
+        return isResumedDuplicate(failure) && resumeDuplicatePolicy == ResumeDuplicatePolicy.FAIL;
+    }
+
+    /** A duplicate-key collision on a resumed run, i.e. a row an earlier run already applied. */
+    private boolean isResumedDuplicate(Throwable failure) {
+        return resumeBelowRow > 0 && isDuplicateKey(failure);
+    }
+
+    /** Walks the cause chain for a duplicate-key/unique-constraint violation. */
+    private static boolean isDuplicateKey(Throwable failure) {
+        for (Throwable current = failure; current != null; current = current.getCause()) {
+            if (current instanceof java.sql.SQLException sql) {
+                String state = sql.getSQLState();
+                if ("23505".equals(state)) {
+                    return true;
+                }
+            }
+            String message = current.getMessage();
+            if (message != null) {
+                String lower = message.toLowerCase(java.util.Locale.ROOT);
+                if (lower.contains("duplicate entry") || lower.contains("duplicate key")
+                        || lower.contains("unique index or primary key violation")
+                        || lower.contains("unique constraint") || lower.contains("ora-00001")) {
+                    return true;
+                }
+            }
+            if (current.getCause() == current) {
+                break;
+            }
+        }
+        return false;
+    }
+
+    private BufferedWriter reconciledWriter() throws IOException {
+        if (reconciledWriter == null) {
+            String fileName = StringUtils.firstNonBlank(
+                    new java.io.File(StringUtils.defaultString(spec.getSourceFile())).getName(), "import")
+                    + ".reconciled.ndjson";
+            var draft = context.createArtifact(RECONCILED_ROLE,
+                    StringUtils.substringBeforeLast(spec.getSourceFile(), java.io.File.separator),
+                    fileName, "application/x-ndjson");
+            reconciledWriter = Files.newBufferedWriter(draft.getTemporaryFile().toPath(), StandardCharsets.UTF_8);
+        }
+        return reconciledWriter;
+    }
+
     private void handleRejectedRow(Long fileRowNumber, String rawRow, String reason) {
         if (!isSkipMode()) {
             throw new TaskExecutionException(TaskErrorCode.IMPORT_FAILED.name(),
@@ -872,7 +1056,8 @@ public final class ImportRowBatcher implements AutoCloseable {
             }
         }
         context.logWarn("IMPORT_ROW_REJECTED", "Import row rejected: " + reason,
-                Map.of("rejectedRows", rejectedRows()));
+                Map.of("row", fileRowNumber == null ? -1L : fileRowNumber,
+                        "rejectedRows", rejectedRows()));
     }
 
     private BufferedWriter rejectWriter() throws IOException {
@@ -982,13 +1167,16 @@ public final class ImportRowBatcher implements AutoCloseable {
             long rowsPerSecond = seconds > 0 ? (long) (importedRows / seconds) : 0L;
             // Final adaptive state: how far the AIMD gate grew/shrank and where the batch sizer
             // settled, for production observability and stress-test reporting.
-            log.info("Import batcher finished: workers={}, batches={}, imported rows={} in {}s "
-                            + "-> {} rows/s, final batch size={}, final gate permits={}",
-                    workerCount, submittedBatches, importedRows, Math.round(seconds), rowsPerSecond,
+            log.info("Import batcher finished: workers={}, batches={}, imported rows={}, "
+                            + "already-applied rows={} in {}s -> {} rows/s, final batch size={}, "
+                            + "final gate permits={}",
+                    workerCount, submittedBatches, importedRows, reconciledCount.sum(),
+                    Math.round(seconds), rowsPerSecond,
                     batchSizer.batchSize(), gate == null ? 1 : gate.availablePermits());
             LAST_TUNING.set(new ImportTuningSnapshot(workerCount, submittedBatches, importedRows,
                     totalImportNanos, batchSizer.batchSize(),
-                    gate == null ? 1 : gate.availablePermits(), peakInFlightBatches.get()));
+                    gate == null ? 1 : gate.availablePermits(), peakInFlightBatches.get(),
+                    reconciledCount.sum(), rejectedRows()));
             if (failure.get() == null) {
                 // Tail checkpoint: after the final flush everything accepted is durable.
                 try {
@@ -1018,6 +1206,14 @@ public final class ImportRowBatcher implements AutoCloseable {
                     rejectWriter.close();
                 } catch (IOException e) {
                     log.warn("Could not close import reject writer", e);
+                }
+            }
+            if (reconciledWriter != null) {
+                try {
+                    reconciledWriter.flush();
+                    reconciledWriter.close();
+                } catch (IOException e) {
+                    log.warn("Could not close import reconciled-rows writer", e);
                 }
             }
         }
