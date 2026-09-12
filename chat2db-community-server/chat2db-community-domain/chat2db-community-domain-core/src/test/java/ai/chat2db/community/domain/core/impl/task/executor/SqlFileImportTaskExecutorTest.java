@@ -16,7 +16,7 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 class SqlFileImportTaskExecutorTest {
 
     @Test
-    void releasesStagedFileWhenExecutionFails(@TempDir Path tempDirectory) throws Exception {
+    void releasesStagedFileAfterExecutionFailureBecomesTerminal(@TempDir Path tempDirectory) throws Exception {
         File source = Files.writeString(tempDirectory.resolve("input.sql"), "select 1").toFile();
         RecordingImportFileStagingService stagingService = new RecordingImportFileStagingService();
         ImportTaskSpec spec = ImportTaskSpec.builder()
@@ -25,8 +25,9 @@ class SqlFileImportTaskExecutorTest {
                 .importFileId("staged-file-id")
                 .build();
 
-        assertThrows(TaskExecutionException.class,
-                () -> new SqlFileImportTaskExecutor(stagingService).execute(spec, null));
+        SqlFileImportTaskExecutor executor = new SqlFileImportTaskExecutor(stagingService);
+        assertThrows(TaskExecutionException.class, () -> executor.execute(spec, null));
+        executor.cleanupTerminalResources(spec, 1L);
 
         assertEquals("staged-file-id", stagingService.releasedFileId);
     }

@@ -2,8 +2,12 @@ package ai.chat2db.community.domain.core.impl.task;
 
 import ai.chat2db.community.domain.api.config.DriverConfig;
 import ai.chat2db.community.domain.api.model.PageResponse;
+import ai.chat2db.community.domain.api.model.task.ArtifactDraft;
 import ai.chat2db.community.domain.api.model.task.ExportTaskSpec;
+import ai.chat2db.community.domain.api.model.task.ResumeState;
 import ai.chat2db.community.domain.api.model.task.Task;
+import ai.chat2db.community.domain.api.model.task.TaskArtifact;
+import ai.chat2db.community.domain.api.model.task.TaskArtifactRole;
 import ai.chat2db.community.domain.api.model.task.TaskConstants;
 import ai.chat2db.community.domain.api.model.task.TaskErrorCode;
 import ai.chat2db.community.domain.api.model.task.TaskEvent;
@@ -14,6 +18,7 @@ import ai.chat2db.community.domain.api.model.task.TaskProgress;
 import ai.chat2db.community.domain.api.model.task.TaskQuery;
 import ai.chat2db.community.domain.api.model.task.TaskStatus;
 import ai.chat2db.community.domain.api.model.task.TaskStatusPatch;
+import ai.chat2db.community.domain.api.model.task.TaskStage;
 import ai.chat2db.community.domain.api.model.task.TaskTargetSnapshot;
 import ai.chat2db.community.domain.api.model.task.TaskType;
 import ai.chat2db.community.domain.api.model.task.extension.TaskOperation;
@@ -131,6 +136,41 @@ class LocalTaskManagerTest {
         assertEquals(TaskErrorCode.TASK_SUBMISSION_REJECTED.name(), rejected.getErrorCode());
         assertEquals("Task submission rejected", rejected.getErrorMessage());
         assertTrue(storage.listNonTerminalTasks().isEmpty());
+    }
+
+    @Test
+    void saturatedExecutionQueueFailsPersistedTaskAndPropagatesRejection() throws Exception {
+        TestTaskStorage storage = new TestTaskStorage();
+        CountDownLatch executionStarted = new CountDownLatch(1);
+        CountDownLatch releaseExecution = new CountDownLatch(1);
+        AtomicLong cleanupCalls = new AtomicLong();
+        taskManager = manager(storage, (spec, context) -> {
+            executionStarted.countDown();
+            try {
+                releaseExecution.await(5, TimeUnit.SECONDS);
+            } catch (InterruptedException interrupted) {
+                Thread.currentThread().interrupt();
+            }
+        }, emptyExtensionManager(), 1, 1, cleanupCalls::incrementAndGet);
+
+        Task running = newTask();
+        Task queued = newTask();
+        Task rejected = newTask();
+        taskManager.submit(running, event(TaskEventCode.TASK_CREATED.name()), spec(), null, null);
+        assertTrue(executionStarted.await(5, TimeUnit.SECONDS));
+        taskManager.submit(queued, event(TaskEventCode.TASK_CREATED.name()), spec(), null, null);
+
+        try {
+            assertThrows(RejectedExecutionException.class,
+                    () -> taskManager.submit(rejected, event(TaskEventCode.TASK_CREATED.name()), spec(), null, null));
+            Task failed = storage.get(rejected.getId()).orElseThrow();
+            assertEquals(TaskStatus.FAILED.name(), failed.getStatus());
+            assertEquals(TaskErrorCode.TASK_EXECUTOR_REJECTED.name(), failed.getErrorCode());
+            assertEquals("Too many tasks are waiting to execute", failed.getErrorMessage());
+            assertEquals(1L, cleanupCalls.get());
+        } finally {
+            releaseExecution.countDown();
+        }
     }
 
     @Test
@@ -252,6 +292,43 @@ class LocalTaskManagerTest {
     }
 
     @Test
+    void userExitCannotPreemptTaskAfterIrreversibleCommitPhaseBegins() throws Exception {
+        TestTaskStorage storage = new TestTaskStorage();
+        CountDownLatch commitPhaseEntered = new CountDownLatch(1);
+        CountDownLatch releaseCommitPhase = new CountDownLatch(1);
+        AtomicBoolean interrupted = new AtomicBoolean();
+        taskManager = manager(storage, (spec, context) -> {
+            context.enterCommitPhase();
+            commitPhaseEntered.countDown();
+            try {
+                releaseCommitPhase.await();
+            } catch (InterruptedException e) {
+                interrupted.set(true);
+                Thread.currentThread().interrupt();
+            }
+            context.checkCancelled();
+        });
+        Task task = newTask();
+        taskManager.submit(task, event(TaskEventCode.TASK_CREATED.name()), spec(), null, null);
+        assertTrue(commitPhaseEntered.await(5, TimeUnit.SECONDS));
+
+        try {
+            taskManager.prepareForUserExit(null, null);
+            assertEquals(TaskStatus.RUNNING.name(), storage.get(task.getId()).orElseThrow().getStatus());
+        } finally {
+            releaseCommitPhase.countDown();
+        }
+
+        assertTrue(storage.awaitTerminal());
+        Task completed = storage.get(task.getId()).orElseThrow();
+        assertEquals(TaskStatus.SUCCESS.name(), completed.getStatus());
+        assertFalse(interrupted.get());
+        assertEquals(1, storage.terminalTransitionCount());
+        assertTrue(storage.listEvents(task.getId(), 0, 100).stream()
+                .noneMatch(event -> TaskEventCode.USER_EXITED.name().equals(event.getCode())));
+    }
+
+    @Test
     void confirmedUserExitRejectsNewTaskBeforeItIsPersisted() {
         TestTaskStorage storage = new TestTaskStorage();
         taskManager = manager(storage, (spec, context) -> {});
@@ -355,6 +432,45 @@ class LocalTaskManagerTest {
         assertEquals(TaskErrorCode.APPLICATION_TERMINATED.name(), failed.getErrorCode());
         assertTrue(storage.listEvents(task.getId(), 0, 100).stream()
                 .anyMatch(event -> TaskEventCode.APPLICATION_TERMINATED.name().equals(event.getCode())));
+    }
+
+    @Test
+    void containerShutdownPreservesCheckpointedTaskWithoutCleaningTerminalResources() throws Exception {
+        TestTaskStorage storage = new TestTaskStorage();
+        CountDownLatch checkpointPersisted = new CountDownLatch(1);
+        CountDownLatch releaseExecution = new CountDownLatch(1);
+        AtomicLong cleanupCalls = new AtomicLong();
+        taskManager = manager(storage, (spec, context) -> {
+            context.checkpoint(ResumeState.builder()
+                    .shardNo(0)
+                    .kind("KEYSET")
+                    .rowsDone(500L)
+                    .build());
+            checkpointPersisted.countDown();
+            try {
+                releaseExecution.await();
+            } catch (InterruptedException interrupted) {
+                Thread.currentThread().interrupt();
+            }
+            context.checkCancelled();
+        }, emptyExtensionManager(), 1, 4, cleanupCalls::incrementAndGet);
+        Task task = newTask();
+        taskManager.submit(task, event(TaskEventCode.TASK_CREATED.name()), spec(), null, null);
+        assertTrue(checkpointPersisted.await(5, TimeUnit.SECONDS));
+
+        try {
+            taskManager.shutdown();
+        } finally {
+            releaseExecution.countDown();
+        }
+
+        Task resumable = storage.get(task.getId()).orElseThrow();
+        assertEquals(TaskStatus.PENDING.name(), resumable.getStatus());
+        assertEquals(TaskStage.RESUMING.name(), resumable.getStage());
+        assertEquals(1, storage.listResumeStates(task.getId()).size());
+        assertEquals(0L, cleanupCalls.get());
+        assertTrue(storage.listEvents(task.getId(), 0, 100).stream()
+                .anyMatch(event -> TaskEventCode.RESUME_AVAILABLE.name().equals(event.getCode())));
     }
 
     @Test
@@ -502,12 +618,112 @@ class LocalTaskManagerTest {
         Files.deleteIfExists(Path.of(storage.get(task.getId()).orElseThrow().getArtifactId()));
     }
 
+    @Test
+    void interruptedTaskWithResumeStateIsPreparedForResumeInsteadOfFailed() throws Exception {
+        TestTaskStorage storage = new TestTaskStorage();
+        Task task = storage.create(newTask(), event(TaskEventCode.TASK_CREATED.name()));
+        assertTrue(storage.compareAndSetStatus(task.getId(), TaskStatus.PENDING.name(),
+                TaskStatus.RUNNING.name(), TaskStatusPatch.builder().build(),
+                event(TaskEventCode.TASK_STARTED.name())));
+        Path temporary = Files.writeString(
+                tempDirectory.resolve(".task-" + task.getId() + "-resume.csv.part"), "partial");
+        storage.saveResumeState(task.getId(), ResumeState.builder()
+                .shardNo(0).kind("KEYSET").rowsDone(500L).build());
+
+        manager(storage, (spec, context) -> {}).reconcileInterruptedTasks();
+
+        Task reconciled = storage.get(task.getId()).orElseThrow();
+        assertEquals(TaskStatus.PENDING.name(), reconciled.getStatus());
+        assertEquals(TaskStage.RESUMING.name(), reconciled.getStage());
+        assertTrue(Files.exists(temporary));
+        assertEquals(TaskEventCode.RESUME_AVAILABLE.name(),
+                storage.listEventsBefore(task.getId(), null, 1).get(0).getCode());
+    }
+
+    @Test
+    void allDraftsOfAMultiArtifactTaskArePublishedRecordedAndCleanable() throws Exception {
+        TestTaskStorage storage = new TestTaskStorage();
+        taskManager = manager(storage, (spec, context) -> {
+            ArtifactDraft reject = context.createArtifact("REJECT", tempDirectory.toString(),
+                    "reject.ndjson", "application/x-ndjson");
+            writeQuietly(reject.getTemporaryFile().toPath(), "{\"line\":1}\n");
+            ArtifactDraft output = context.createArtifact(tempDirectory.toString(), "export.csv", "text/csv");
+            writeQuietly(output.getTemporaryFile().toPath(), "value\n");
+        });
+        Task task = newTask();
+
+        taskManager.submit(task, event(TaskEventCode.TASK_CREATED.name()), spec(), null, null);
+
+        assertTrue(storage.awaitTerminal());
+        Task finished = storage.get(task.getId()).orElseThrow();
+        assertEquals(TaskStatus.SUCCESS.name(), finished.getStatus());
+        List<TaskArtifact> publishedArtifacts = storage.listArtifacts(task.getId());
+        assertEquals(List.of("REJECT", "OUTPUT"),
+                publishedArtifacts.stream().map(TaskArtifact::getRole).toList());
+        // The legacy single-artifact column always names the OUTPUT row, whichever order it was created in.
+        assertEquals("export.csv", Path.of(finished.getArtifactId()).getFileName().toString());
+        assertTrue(publishedArtifacts.stream()
+                .anyMatch(artifact -> artifact.getArtifactId().equals(finished.getArtifactId())));
+        for (TaskArtifact artifact : publishedArtifacts) {
+            Files.deleteIfExists(Path.of(artifact.getArtifactId()));
+        }
+    }
+
+    @Test
+    void failedTaskPublishesDiagnosticsButDeletesOrdinaryOutput() throws Exception {
+        TestTaskStorage storage = new TestTaskStorage();
+        taskManager = manager(storage, (spec, context) -> {
+            ArtifactDraft output = context.createArtifact(tempDirectory.toString(),
+                    "partial.csv", "text/csv");
+            writeQuietly(output.getTemporaryFile().toPath(), "partial\n");
+            ArtifactDraft reject = context.createArtifact(TaskArtifactRole.REJECT + ":shard-1",
+                    tempDirectory.toString(), "reject.ndjson", "application/x-ndjson");
+            writeQuietly(reject.getTemporaryFile().toPath(), "{\"row\":1}\n");
+            ArtifactDraft report = context.createArtifact(TaskArtifactRole.IMPORT_REPORT,
+                    tempDirectory.toString(), "rollback.json", "application/json");
+            writeQuietly(report.getTemporaryFile().toPath(), "{\"rolledBack\":true}\n");
+            throw new TaskExecutionException(TaskErrorCode.IMPORT_FAILED.name(),
+                    "Import failed", "Rejected source row", null);
+        });
+        Task task = newTask();
+
+        taskManager.submit(task, event(TaskEventCode.TASK_CREATED.name()), spec(), null, null);
+
+        assertTrue(storage.awaitTerminal());
+        Task failed = storage.get(task.getId()).orElseThrow();
+        assertEquals(TaskStatus.FAILED.name(), failed.getStatus());
+        assertFalse(Files.exists(tempDirectory.resolve("partial.csv")));
+        List<TaskArtifact> diagnostics = storage.listArtifacts(task.getId());
+        assertEquals(List.of(TaskArtifactRole.IMPORT_REPORT, TaskArtifactRole.REJECT + ":shard-1"),
+                diagnostics.stream().map(TaskArtifact::getRole).toList());
+        assertEquals(diagnostics.get(0).getArtifactId(), failed.getArtifactId());
+        assertTrue(diagnostics.stream().allMatch(
+                artifact -> Files.isRegularFile(Path.of(artifact.getArtifactId()))));
+        assertEquals(2L, storage.listEvents(task.getId(), 0, 100).stream()
+                .filter(item -> TaskEventCode.ARTIFACT_PUBLISHED.name().equals(item.getCode()))
+                .count());
+        for (TaskArtifact artifact : diagnostics) {
+            Files.deleteIfExists(Path.of(artifact.getArtifactId()));
+        }
+    }
+
     private LocalTaskManager manager(TestTaskStorage storage, TestExecution execution) {
         return manager(storage, execution, emptyExtensionManager());
     }
 
     private LocalTaskManager manager(TestTaskStorage storage, TestExecution execution,
             TaskExtensionManager extensionManager) {
+        return manager(storage, execution, extensionManager, 1, 4, () -> { });
+    }
+
+    private LocalTaskManager manager(TestTaskStorage storage, TestExecution execution,
+            TaskExtensionManager extensionManager, int maxConcurrency, int queueCapacity) {
+        return manager(storage, execution, extensionManager, maxConcurrency, queueCapacity, () -> { });
+    }
+
+    private LocalTaskManager manager(TestTaskStorage storage, TestExecution execution,
+            TaskExtensionManager extensionManager, int maxConcurrency, int queueCapacity,
+            Runnable terminalResourceCleanup) {
         TaskExecutor<ExportTaskSpec> executor = new TaskExecutor<>() {
             @Override
             public String taskType() {
@@ -523,9 +739,14 @@ class LocalTaskManagerTest {
             public void execute(ExportTaskSpec spec, TaskExecutionContext context) {
                 execution.execute(spec, context);
             }
+
+            @Override
+            public void cleanupTerminalResources(ExportTaskSpec spec, Long taskId) {
+                terminalResourceCleanup.run();
+            }
         };
         return new LocalTaskManager(storage, new TaskExecutorRegistry(List.of(executor)), new ArtifactServiceImpl(),
-                new ConnectionContextConverter(), extensionManager, 1, 4);
+                new ConnectionContextConverter(), extensionManager, maxConcurrency, queueCapacity);
     }
 
     private TaskExtensionManager emptyExtensionManager() {
@@ -556,6 +777,14 @@ class LocalTaskManagerTest {
                 .build();
     }
 
+    private static void writeQuietly(Path path, String content) {
+        try {
+            Files.writeString(path, content);
+        } catch (java.io.IOException e) {
+            throw new java.io.UncheckedIOException(e);
+        }
+    }
+
     private void assertUnexpectedCancellationFailed(TestTaskStorage storage, Task task) throws InterruptedException {
         assertTrue(storage.awaitTerminal());
         Task failed = storage.get(task.getId()).orElseThrow();
@@ -575,6 +804,8 @@ class LocalTaskManagerTest {
         private final AtomicLong ids = new AtomicLong();
         private final Map<Long, Task> tasks = new LinkedHashMap<>();
         private final Map<Long, List<TaskEvent>> events = new LinkedHashMap<>();
+        private final Map<Long, List<TaskArtifact>> artifacts = new LinkedHashMap<>();
+        private final Map<Long, List<ResumeState>> resumeStates = new LinkedHashMap<>();
         private final CountDownLatch terminal = new CountDownLatch(1);
         private int terminalTransitions;
         private CountDownLatch createPaused;
@@ -606,7 +837,11 @@ class LocalTaskManagerTest {
 
         @Override
         public synchronized Optional<Task> get(Long taskId) {
-            return Optional.ofNullable(tasks.get(taskId));
+            Task task = tasks.get(taskId);
+            if (task != null) {
+                task.setArtifacts(new ArrayList<>(artifacts.getOrDefault(taskId, List.of())));
+            }
+            return Optional.ofNullable(task);
         }
 
         @Override
@@ -702,8 +937,62 @@ class LocalTaskManagerTest {
             }
             tasks.remove(taskId);
             events.remove(taskId);
+            artifacts.remove(taskId);
+            resumeStates.remove(taskId);
             commitAction.run();
             return true;
+        }
+
+        @Override
+        public synchronized List<TaskArtifact> listArtifacts(Long taskId) {
+            return new ArrayList<>(artifacts.getOrDefault(taskId, List.of()));
+        }
+
+        @Override
+        public synchronized void saveArtifact(Long taskId, TaskArtifact artifact) {
+            if (!tasks.containsKey(taskId)) {
+                throw new IllegalArgumentException("artifact must reference an existing task");
+            }
+            List<TaskArtifact> stored = artifacts.computeIfAbsent(taskId, ignored -> new ArrayList<>());
+            stored.removeIf(existing -> existing.getArtifactId().equals(artifact.getArtifactId()));
+            stored.add(artifact);
+        }
+
+        @Override
+        public synchronized void deleteArtifact(Long taskId, String artifactId) {
+            List<TaskArtifact> stored = artifacts.get(taskId);
+            if (stored != null) {
+                stored.removeIf(existing -> existing.getArtifactId().equals(artifactId));
+            }
+        }
+
+        @Override
+        public synchronized List<Task> listResumableTasks() {
+            return tasks.values().stream()
+                    .filter(task -> !TaskStatus.isTerminal(task.getStatus()))
+                    .filter(task -> !resumeStates.getOrDefault(task.getId(), List.of()).isEmpty())
+                    .toList();
+        }
+
+        @Override
+        public synchronized void saveResumeState(Long taskId, ResumeState state) {
+            if (!tasks.containsKey(taskId)) {
+                throw new IllegalArgumentException("resume state must reference an existing task");
+            }
+            List<ResumeState> stored = resumeStates.computeIfAbsent(taskId, ignored -> new ArrayList<>());
+            stored.removeIf(existing -> existing.getShardNo().equals(state.getShardNo()));
+            stored.add(state);
+            stored.sort(Comparator.comparing(ResumeState::getShardNo));
+        }
+
+        @Override
+        public synchronized List<ResumeState> listResumeStates(Long taskId) {
+            return new ArrayList<>(resumeStates.getOrDefault(taskId, List.of()));
+        }
+
+        @Override
+        public synchronized void clearResumeStates(Long taskId) {
+            resumeStates.remove(taskId);
         }
 
         boolean awaitTerminal() throws InterruptedException {

@@ -1,9 +1,15 @@
 package ai.chat2db.community.domain.core.impl.task;
 
 import ai.chat2db.community.domain.api.model.PageResponse;
+import ai.chat2db.community.domain.api.model.metadata.TableColumn;
+import ai.chat2db.community.domain.api.model.request.runtime.DbConnectionContextRequest;
 import ai.chat2db.community.domain.api.model.task.ExportTaskSpec;
+import ai.chat2db.community.domain.api.model.task.ImportPreview;
 import ai.chat2db.community.domain.api.model.task.ImportTaskSpec;
+import ai.chat2db.community.domain.api.model.task.ImportTableSource;
 import ai.chat2db.community.domain.api.model.task.Task;
+import ai.chat2db.community.domain.api.model.task.TaskArtifact;
+import ai.chat2db.community.domain.api.model.task.TaskArtifactRole;
 import ai.chat2db.community.domain.api.model.task.TaskConstants;
 import ai.chat2db.community.domain.api.model.task.TaskDownload;
 import ai.chat2db.community.domain.api.model.task.TaskEvent;
@@ -13,37 +19,93 @@ import ai.chat2db.community.domain.api.model.task.TaskQuery;
 import ai.chat2db.community.domain.api.model.task.TaskSpec;
 import ai.chat2db.community.domain.api.model.task.TaskStage;
 import ai.chat2db.community.domain.api.model.task.TaskStatus;
+import ai.chat2db.community.domain.api.model.task.TaskTargetSnapshot;
+import ai.chat2db.community.domain.api.model.task.TaskType;
+import ai.chat2db.community.domain.api.service.db.IDbConnectionContextService;
+import ai.chat2db.community.domain.api.service.file.IImportFileStagingService;
+import ai.chat2db.community.domain.api.service.task.ArtifactService;
 import ai.chat2db.community.domain.api.service.task.TaskDeletionService;
 import ai.chat2db.community.domain.api.service.task.TaskService;
 import ai.chat2db.community.domain.api.service.task.TaskStorage;
+import ai.chat2db.community.domain.core.impl.task.imports.ImportColumnResolver;
+import ai.chat2db.community.domain.core.impl.task.imports.ImportFileProbe;
+import ai.chat2db.community.domain.core.impl.task.imports.ImportParallelAdmission;
+import ai.chat2db.community.domain.core.impl.task.imports.ImportTaskSourceSupport;
+import ai.chat2db.community.domain.core.impl.task.imports.excel.ImportPreviewListener;
+import com.alibaba.excel.EasyExcel;
+import com.alibaba.excel.support.ExcelTypeEnum;
+import org.apache.commons.csv.CSVFormat;
 import ai.chat2db.community.tools.exception.BusinessException;
 import ai.chat2db.community.tools.exception.DataNotFoundException;
 import ai.chat2db.community.tools.model.Context;
 import ai.chat2db.community.tools.util.ContextUtils;
 import ai.chat2db.spi.model.datasource.ConnectInfo;
+import ai.chat2db.spi.model.imports.ImportResourceSnapshot;
+import ai.chat2db.spi.model.request.TableMetadataRequest;
 import ai.chat2db.spi.sql.Chat2DBContext;
 import jakarta.annotation.PostConstruct;
+import com.alibaba.fastjson2.JSON;
 import org.apache.commons.lang3.StringUtils;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 
 import java.io.File;
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.Objects;
+import java.util.function.Function;
 
 @Service
 public class TaskServiceImpl implements TaskService {
 
+    @org.springframework.beans.factory.annotation.Value("${chat2db.task.import.allowed-roots:}")
+    private String importAllowedRoots;
     private final TaskStorage taskStorage;
 
     private final LocalTaskManager localTaskManager;
 
     private final TaskDeletionService deletionService;
 
-    public TaskServiceImpl(TaskStorage taskStorage, LocalTaskManager localTaskManager, TaskDeletionService deletionService) {
+    private final IDbConnectionContextService connectionContextService;
+
+    private final IImportFileStagingService importFileStagingService;
+
+    @Autowired
+    public TaskServiceImpl(TaskStorage taskStorage, LocalTaskManager localTaskManager,
+            TaskDeletionService deletionService, IDbConnectionContextService connectionContextService,
+            IImportFileStagingService importFileStagingService) {
         this.taskStorage = taskStorage;
         this.localTaskManager = localTaskManager;
         this.deletionService = deletionService;
+        this.connectionContextService = connectionContextService;
+        this.importFileStagingService = importFileStagingService;
+    }
+
+    public TaskServiceImpl(TaskStorage taskStorage, LocalTaskManager localTaskManager,
+            TaskDeletionService deletionService, IDbConnectionContextService connectionContextService) {
+        this(taskStorage, localTaskManager, deletionService, connectionContextService, null);
+    }
+
+    TaskServiceImpl(TaskStorage taskStorage, LocalTaskManager localTaskManager,
+            TaskDeletionService deletionService) {
+        this(taskStorage, localTaskManager, deletionService, null, null);
+    }
+
+    public TaskServiceImpl(TaskStorage taskStorage, LocalTaskManager localTaskManager,
+            ArtifactService artifactService, IDbConnectionContextService connectionContextService,
+            IImportFileStagingService importFileStagingService) {
+        this(taskStorage, localTaskManager, new TaskDeletionServiceImpl(taskStorage, artifactService),
+                connectionContextService, importFileStagingService);
+    }
+
+    public TaskServiceImpl(TaskStorage taskStorage, LocalTaskManager localTaskManager,
+            ArtifactService artifactService, IDbConnectionContextService connectionContextService) {
+        this(taskStorage, localTaskManager, artifactService, connectionContextService, null);
+    }
+
+    TaskServiceImpl(TaskStorage taskStorage, LocalTaskManager localTaskManager, ArtifactService artifactService) {
+        this(taskStorage, localTaskManager, artifactService, null, null);
     }
 
     @PostConstruct
@@ -56,9 +118,241 @@ public class TaskServiceImpl implements TaskService {
         return submit(spec);
     }
 
+    /** Staged and desktop-bridge paths are the intended local import boundary. */
+    @SuppressWarnings("lgtm[java/path-injection]")
     @Override
     public Long submitImport(ImportTaskSpec spec) {
+        boolean sqlFileImport = TaskType.SQL_FILE_IMPORT.name().equals(spec.getTaskType());
+        if (sqlFileImport || spec.getTableSources() == null || spec.getTableSources().isEmpty()) {
+            validateImportSource(spec.getSourceFile());
+        } else {
+            spec.getTableSources().stream().filter(Objects::nonNull)
+                    .map(ImportTableSource::getSourceFile).forEach(this::validateImportSource);
+        }
+        if (sqlFileImport) {
+            ImportTaskSourceSupport.validateSqlImportControls(spec);
+        } else if (TaskType.DATA_FILE_IMPORT.name().equals(spec.getTaskType())
+                || spec.getTableSources() != null && !spec.getTableSources().isEmpty()) {
+            ImportTaskSourceSupport.effectiveSources(spec);
+        }
         return submit(spec);
+    }
+
+    @Override
+    public Long findImportTaskId(String clientSubmissionId, String clientSubmissionFingerprint) {
+        if (StringUtils.isBlank(clientSubmissionId) || StringUtils.isBlank(clientSubmissionFingerprint)) {
+            return null;
+        }
+        TaskOwner owner = currentOwner();
+        Task task = taskStorage.findByClientSubmissionId(
+                        clientSubmissionId.trim(), owner.userId(), owner.organizationId())
+                .filter(candidate -> TaskType.DATA_FILE_IMPORT.name().equals(candidate.getType())
+                        || TaskType.SQL_FILE_IMPORT.name().equals(candidate.getType()))
+                .orElse(null);
+        if (task == null) {
+            return null;
+        }
+        if (!clientSubmissionFingerprint.equals(task.getClientSubmissionFingerprint())) {
+            throw new BusinessException("task.import.submissionConflict");
+        }
+        return task.getId();
+    }
+
+    /** Staged and desktop-bridge paths are the intended local import boundary. */
+    @SuppressWarnings("lgtm[java/path-injection]")
+    @Override
+    public ImportPreview previewImport(ImportTaskSpec spec) {
+        if (StringUtils.isNotBlank(spec.getImportFileId())) {
+            spec.setSourceFile(importFileStagingService.resolve(spec.getImportFileId()).getAbsolutePath());
+        }
+        validateImportSource(spec.getSourceFile());
+        java.io.File source = new java.io.File(StringUtils.defaultString(spec.getSourceFile()));
+        if (!source.isFile() || !source.canRead()) {
+            throw new BusinessException("task.import.preview.sourceUnreadable", null);
+        }
+        String format = StringUtils.upperCase(StringUtils.trimToEmpty(spec.getFormat()),
+                java.util.Locale.ROOT);
+        ImportPreviewTarget previewTarget = loadImportTarget(spec);
+        return switch (format) {
+            case "CSV" -> previewCsv(source, spec, previewTarget.tableColumns(), previewTarget.resources());
+            case "XLSX", "XLS" -> previewExcel(source, spec, previewTarget.tableColumns(),
+                    previewTarget.resources(), format);
+            default -> throw new BusinessException("task.import.preview.unsupportedFormat", null);
+        };
+    }
+
+    private ImportPreviewTarget loadImportTarget(ImportTaskSpec spec) {
+        return withTargetConnection(spec, connectInfo -> {
+            TaskTargetSnapshot target = spec.getTarget();
+            TableMetadataRequest trusted = ai.chat2db.community.domain.core.impl.db.TrustedMetadataRequestResolver
+                    .table(target.getDataSourceId(), target.getDatabaseName(), target.getSchemaName(),
+                            target.getTableName());
+            java.sql.Connection connection = Chat2DBContext.getConnection();
+            List<TableColumn> columns = Chat2DBContext.getDbMetaData().columns(connection, trusted);
+            ImportResourceSnapshot resources = Chat2DBContext.getDbManager().probeImportResources(
+                    connection, target.getDatabaseName(), target.getSchemaName());
+            return new ImportPreviewTarget(columns, resources);
+        });
+    }
+
+    private ImportPreview previewCsv(java.io.File source, ImportTaskSpec spec, List<TableColumn> tableColumns,
+            ImportResourceSnapshot resources) {
+        try {
+            java.nio.charset.Charset charset = ImportFileProbe.effectiveCharset(source,
+                    spec.getOptions() == null ? null : spec.getOptions().getCharset());
+            char quote = ImportFileProbe.quoteChar(
+                    spec.getOptions() == null ? null : spec.getOptions().getQuoteChar());
+            char delimiter = ImportFileProbe.delimiterChar(
+                    spec.getOptions() == null ? null : spec.getOptions().getDelimiter(), charset, source);
+            CSVFormat format = ImportFileProbe.csvFormat(delimiter, quote);
+            List<List<String>> rows = ImportFileProbe.readSample(source, charset, format,
+                    ImportFileProbe.sampleRows());
+            return buildPreview(rows, tableColumns, spec, charset.name(), String.valueOf(delimiter),
+                    resources);
+        } catch (java.io.IOException e) {
+            throw new BusinessException("task.import.preview.failed", null, e);
+        }
+    }
+
+    private ImportPreview previewExcel(java.io.File source, ImportTaskSpec spec, List<TableColumn> tableColumns,
+            ImportResourceSnapshot resources, String format) {
+        ImportPreviewListener listener = new ImportPreviewListener();
+        EasyExcel.read(source, listener)
+                .excelType("XLS".equals(format) ? ExcelTypeEnum.XLS : ExcelTypeEnum.XLSX)
+                .sheet()
+                .headRowNumber(1)
+                .doRead();
+        return buildPreview(listener.rows(), tableColumns, spec, null, null, resources);
+    }
+
+    private ImportPreview buildPreview(List<List<String>> rows, List<TableColumn> tableColumns,
+            ImportTaskSpec spec, String detectedCharset, String detectedDelimiter,
+            ImportResourceSnapshot resources) {
+        List<String> headers = rows.isEmpty() ? List.of() : rows.get(0);
+        ImportColumnResolver.Resolution resolution =
+                ImportColumnResolver.resolveForSpec(tableColumns, headers, spec);
+        return ImportPreview.builder()
+                .targetColumns(tableColumns.stream().map(column ->
+                        ai.chat2db.community.domain.api.model.db.ImportTargetColumn.builder()
+                                .name(column.getName()).dataType(column.getColumnType())
+                                .nullable(Integer.valueOf(1).equals(column.getNullable()))
+                                .autoIncrement(Boolean.TRUE.equals(column.getAutoIncrement()))
+                                .defaultValue(column.getDefaultValue()).comment(column.getComment()).build()).toList())
+                .fileColumns(headers)
+                .columnMatches(resolution.matches())
+                .missingTableColumns(resolution.missingTableColumns())
+                .sampleRows(rows.size() <= 1 ? List.of()
+                        : rows.subList(1, rows.size()).stream().map(row -> (List<String>) row).toList())
+                .detectedCharset(detectedCharset)
+                .detectedDelimiter(detectedDelimiter)
+                .parallelAdmission(ImportParallelAdmission.assess(spec, tableColumns, resources))
+                .build();
+    }
+
+
+    private record ImportPreviewTarget(List<TableColumn> tableColumns, ImportResourceSnapshot resources) {
+    }
+
+    @Override
+    public Long resume(Long taskId) {
+        Task task = get(taskId);
+        if (task == null || !TaskStatus.PENDING.name().equals(task.getStatus())
+                || StringUtils.isBlank(task.getSpecJson())
+                || taskStorage.listResumeStates(taskId).isEmpty()) {
+            // Only a task that startup reconciliation left pending with checkpoints is resumable;
+            // anything else is reported like a missing task.
+            throw new DataNotFoundException();
+        }
+        TaskSpec spec = parseSpec(task);
+        localTaskManager.validate(spec);
+        Context context = ContextUtils.queryContext();
+        ConnectInfo connectInfo = resumeConnectInfo(spec);
+        try {
+            localTaskManager.resume(task, spec, context, connectInfo);
+        } catch (IllegalStateException | java.util.concurrent.RejectedExecutionException race) {
+            // A double resume or an exit-in-progress race must surface as a client error, not a 500.
+            throw new BusinessException("task.resume.conflict", null, race);
+        }
+        return taskId;
+    }
+
+    /**
+     * Rebuilds the connection from the persisted task target. A resume request intentionally needs
+     * only the task id and must not depend on whichever data source happens to be selected in the
+     * client after a restart.
+     */
+    ConnectInfo resumeConnectInfo(TaskSpec spec) {
+        return withTargetConnection(spec, ConnectInfo::copy);
+    }
+
+    private <T> T withTargetConnection(TaskSpec spec, Function<ConnectInfo, T> action) {
+        TaskTargetSnapshot target = spec == null ? null : spec.getTarget();
+        if (target == null || target.getDataSourceId() == null || connectionContextService == null) {
+            throw new BusinessException("datasource.not.found");
+        }
+        DbConnectionContextRequest request = new DbConnectionContextRequest();
+        request.setDataSourceId(target.getDataSourceId());
+        request.setDatabaseName(target.getDatabaseName());
+        request.setSchemaName(target.getSchemaName());
+        ConnectInfo previous = Chat2DBContext.getConnectInfo();
+        try {
+            connectionContextService.bind(request);
+            ConnectInfo resolved = Chat2DBContext.getConnectInfo();
+            if (resolved == null) {
+                throw new BusinessException("datasource.not.found");
+            }
+            return action.apply(resolved);
+        } finally {
+            try {
+                connectionContextService.clear();
+            } finally {
+                if (previous == null) {
+                    Chat2DBContext.removeContext();
+                } else {
+                    Chat2DBContext.putContext(previous);
+                }
+            }
+        }
+    }
+
+    /**
+     * Server deployments can restrict which directories import files may come from; desktop runs
+     * keep the unrestricted default. Paths are compared normalized and absolute so `..` segments
+     * cannot escape the allowlist.
+     */
+    private void validateImportSource(String sourceFile) {
+        if (StringUtils.isBlank(importAllowedRoots) || StringUtils.isBlank(sourceFile)) {
+            return;
+        }
+        java.nio.file.Path candidate;
+        try {
+            candidate = java.nio.file.Path.of(sourceFile).toAbsolutePath().normalize().toRealPath();
+        } catch (java.nio.file.InvalidPathException | java.io.IOException invalidPath) {
+            throw new BusinessException("task.import.sourceNotAllowed", null);
+        }
+        for (String root : importAllowedRoots.split(",")) {
+            if (StringUtils.isBlank(root)) {
+                continue;
+            }
+            try {
+                java.nio.file.Path allowedRoot = java.nio.file.Path.of(root.trim()).toAbsolutePath()
+                        .normalize().toRealPath();
+                if (candidate.startsWith(allowedRoot)) {
+                    return;
+                }
+            } catch (java.nio.file.InvalidPathException | java.io.IOException ignored) {
+                // An invalid configured root cannot authorize access to any source path.
+            }
+        }
+        throw new BusinessException("task.import.sourceNotAllowed", null);
+    }
+
+    private TaskSpec parseSpec(Task task) {
+        String type = task.getType();
+        if (TaskType.DATA_FILE_IMPORT.name().equals(type) || TaskType.SQL_FILE_IMPORT.name().equals(type)) {
+            return JSON.parseObject(task.getSpecJson(), ImportTaskSpec.class);
+        }
+        return JSON.parseObject(task.getSpecJson(), ExportTaskSpec.class);
     }
 
     @Override
@@ -124,15 +418,58 @@ public class TaskServiceImpl implements TaskService {
     @Override
     public TaskDownload resolveArtifact(Long taskId) {
         Task task = get(taskId);
-        if (task == null || !TaskStatus.SUCCESS.name().equals(task.getStatus())
-                || StringUtils.isBlank(task.getArtifactId())) {
+        if (task == null || StringUtils.isBlank(task.getArtifactId())) {
             throw new DataNotFoundException();
         }
-        File file = deletionService.resolveArtifact(task);
+        if (TaskStatus.SUCCESS.name().equals(task.getStatus())) {
+            // The stored path is resolved through the deletion service so a task whose artifact is
+            // already staged for deletion still serves the staged file instead of a dead path.
+            File file = deletionService.resolveArtifact(task);
+            return downloadFor(file, new File(task.getArtifactId()).getName());
+        }
+        return resolveStoredArtifact(task, task.getArtifactId());
+    }
+
+    @Override
+    public TaskDownload resolveArtifact(Long taskId, String artifactId) {
+        Task task = get(taskId);
+        if (task == null) {
+            throw new DataNotFoundException();
+        }
+        return resolveStoredArtifact(task, artifactId);
+    }
+
+    private TaskDownload resolveStoredArtifact(Task task, String artifactId) {
+        if (StringUtils.isBlank(artifactId)) {
+            throw new DataNotFoundException();
+        }
+        // The parameter is only a lookup key; the served path always comes from the stored row, so
+        // a caller cannot name an arbitrary file.
+        TaskArtifact artifact = taskStorage.listArtifacts(task.getId()).stream()
+                .filter(candidate -> Objects.equals(candidate.getArtifactId(), artifactId))
+                .findFirst()
+                .orElseThrow(DataNotFoundException::new);
+        boolean successArtifact = TaskStatus.SUCCESS.name().equals(task.getStatus());
+        boolean terminalDiagnostic = (TaskStatus.FAILED.name().equals(task.getStatus())
+                || TaskStatus.CANCELLED.name().equals(task.getStatus()))
+                && TaskArtifactRole.isDiagnostic(artifact.getRole());
+        if (!successArtifact && !terminalDiagnostic) {
+            throw new DataNotFoundException();
+        }
+        File file = new File(artifact.getArtifactId());
+        return downloadFor(file, new File(artifact.getArtifactId()).getName());
+    }
+
+    @Override
+    public List<TaskArtifact> listArtifacts(Long taskId) {
+        return get(taskId) == null ? List.of() : taskStorage.listArtifacts(taskId);
+    }
+
+    private TaskDownload downloadFor(File file, String fileName) {
         if (!file.isFile() || !file.canRead()) {
             throw new DataNotFoundException();
         }
-        return TaskDownload.builder().fileName(new File(task.getArtifactId()).getName())
+        return TaskDownload.builder().fileName(fileName)
                 .fileUri(file.toURI().toString()).build();
     }
 
@@ -145,6 +482,10 @@ public class TaskServiceImpl implements TaskService {
         TaskOwner owner = owner(context);
         ConnectInfo connectInfo = Chat2DBContext.getConnectInfo();
         Task task = Task.builder()
+                .clientSubmissionId(spec instanceof ImportTaskSpec importSpec
+                        ? StringUtils.trimToNull(importSpec.getClientSubmissionId()) : null)
+                .clientSubmissionFingerprint(spec instanceof ImportTaskSpec importSpec
+                        ? StringUtils.trimToNull(importSpec.getClientSubmissionFingerprint()) : null)
                 .type(spec.getTaskType())
                 .name(StringUtils.defaultIfBlank(spec.getTaskName(), spec.getTaskType()))
                 .target(spec.getTarget())

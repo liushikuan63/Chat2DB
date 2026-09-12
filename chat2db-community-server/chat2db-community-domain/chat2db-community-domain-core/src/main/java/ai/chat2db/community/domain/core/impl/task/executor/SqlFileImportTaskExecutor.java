@@ -11,6 +11,7 @@ import ai.chat2db.community.domain.api.service.file.IImportFileStagingService;
 import ai.chat2db.community.domain.api.service.task.TaskExecutionContext;
 import ai.chat2db.community.domain.api.service.task.TaskExecutor;
 import ai.chat2db.community.domain.core.impl.task.imports.ImportFactory;
+import ai.chat2db.community.domain.core.impl.task.imports.ImportParallelAdmission;
 import org.springframework.stereotype.Component;
 
 @Component
@@ -42,6 +43,7 @@ public class SqlFileImportTaskExecutor implements TaskExecutor<ImportTaskSpec> {
                         "SQL import requires an SQL file");
             }
             context.reportProgress(5, TaskStage.READING.name(), "Preparing SQL import");
+            ImportParallelAdmission.enforce(spec, java.util.List.of(), context);
             ImportFactory.get(format).run(spec, context);
             context.reportProgress(95, TaskStage.IMPORTING.name(), "SQL import completed");
         } catch (TaskCancelledException | TaskExecutionException e) {
@@ -49,10 +51,13 @@ public class SqlFileImportTaskExecutor implements TaskExecutor<ImportTaskSpec> {
         } catch (Exception e) {
             throw new TaskExecutionException(TaskErrorCode.IMPORT_FAILED.name(),
                     "Could not import SQL file", e);
-        } finally {
-            if (spec.getImportFileId() != null) {
-                importFileStagingService.release(spec.getImportFileId());
-            }
+        }
+    }
+
+    @Override
+    public void cleanupTerminalResources(ImportTaskSpec spec, Long taskId) {
+        if (spec != null && spec.getImportFileId() != null) {
+            importFileStagingService.release(spec.getImportFileId());
         }
     }
 }

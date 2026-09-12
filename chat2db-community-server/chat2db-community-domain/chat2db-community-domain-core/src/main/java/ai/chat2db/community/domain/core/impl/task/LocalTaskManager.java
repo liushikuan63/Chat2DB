@@ -2,7 +2,9 @@ package ai.chat2db.community.domain.core.impl.task;
 
 import ai.chat2db.community.domain.api.model.task.ExportTaskSpec;
 import ai.chat2db.community.domain.api.model.task.ImportTaskSpec;
+import ai.chat2db.community.domain.api.model.task.ImportTableSource;
 import ai.chat2db.community.domain.api.model.task.Task;
+import ai.chat2db.community.domain.api.model.task.TaskArtifact;
 import ai.chat2db.community.domain.api.model.task.TaskConstants;
 import ai.chat2db.community.domain.api.model.task.TaskErrorCode;
 import ai.chat2db.community.domain.api.model.task.TaskEvent;
@@ -24,8 +26,11 @@ import ai.chat2db.community.domain.core.converter.ConnectionContextConverter;
 import ai.chat2db.community.domain.core.impl.task.extension.TaskExtensionManager;
 import ai.chat2db.community.tools.model.Context;
 import ai.chat2db.spi.model.datasource.ConnectInfo;
+import com.alibaba.fastjson2.JSON;
 import jakarta.annotation.PostConstruct;
 import jakarta.annotation.PreDestroy;
+import lombok.extern.slf4j.Slf4j;
+import org.apache.commons.lang3.StringUtils;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
@@ -35,6 +40,7 @@ import java.util.Date;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.FutureTask;
 import java.util.concurrent.RejectedExecutionException;
@@ -43,8 +49,10 @@ import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.locks.ReentrantLock;
+import java.util.stream.Collectors;
 
 @Component
+@Slf4j
 public class LocalTaskManager {
 
     private static final long EXIT_TASK_WAIT_MILLIS = 2000L;
@@ -85,16 +93,52 @@ public class LocalTaskManager {
 
     @PostConstruct
     void reconcileInterruptedTasks() {
+        Set<Long> resumableTaskIds = taskStorage.listResumableTasks().stream()
+                .map(Task::getId)
+                .collect(Collectors.toSet());
         for (Task task : taskStorage.listTasksForRecovery()) {
+            boolean resumable = resumableTaskIds.contains(task.getId());
             if (!TaskStatus.isTerminal(task.getStatus())) {
-                failPersistedTask(task, TaskErrorCode.APPLICATION_TERMINATED.name(),
-                        TaskEventCode.APPLICATION_TERMINATED.name(),
-                        "The application terminated before the task completed");
-                cleanupInterruptedArtifacts(task.getId());
+                if (resumable) {
+                    prepareResumableTask(task);
+                } else {
+                    failPersistedTask(task, TaskErrorCode.APPLICATION_TERMINATED.name(),
+                            TaskEventCode.APPLICATION_TERMINATED.name(),
+                            "The application terminated before the task completed");
+                    cleanupInterruptedArtifacts(task.getId());
+                }
             } else if (TaskStatus.FAILED.name().equals(task.getStatus())
-                    && isTerminationError(task.getErrorCode())) {
+                    && isTerminationError(task.getErrorCode()) && !resumable) {
                 cleanupInterruptedArtifacts(task.getId());
             }
+            if (!resumable) {
+                taskStorage.get(task.getId())
+                        .filter(current -> TaskStatus.isTerminal(current.getStatus()))
+                        .ifPresent(this::cleanupStoredTerminalResources);
+            }
+        }
+    }
+
+    /**
+     * Keeps a checkpointed task alive for a later resume: a running row is requeued to PENDING with
+     * the RESUMING stage, a pending row only records the event, and the draft files stay in place.
+     */
+    private boolean prepareResumableTask(Task task) {
+        TaskEvent resumeEvent = event(TaskEventCode.RESUME_AVAILABLE.name(), TaskEventLevel.INFO.name(),
+                "The application terminated before the task completed; the task can be resumed");
+        if (TaskStatus.RUNNING.name().equals(task.getStatus())) {
+            Date now = new Date();
+            return taskStorage.compareAndSetStatus(task.getId(), TaskStatus.RUNNING.name(), TaskStatus.PENDING.name(),
+                    TaskStatusPatch.builder()
+                            .stage(TaskStage.RESUMING.name())
+                            .progressMessage("Task can be resumed")
+                            .updatedAt(now)
+                            .build(),
+                    resumeEvent);
+        } else {
+            resumeEvent.setTaskId(task.getId());
+            taskStorage.appendEvent(resumeEvent);
+            return true;
         }
     }
 
@@ -105,17 +149,47 @@ public class LocalTaskManager {
             if (preparingForExit) {
                 throw new RejectedExecutionException("The application is preparing to exit");
             }
+            task.setSpecJson(JSON.toJSONString(spec));
             Task persistedTask = taskStorage.create(task, createdEvent);
             TaskSubmissionContext extensionContext = extensionContext(persistedTask, spec, connectInfo);
             try {
                 taskExtensionManager.capture(extensionContext);
             } catch (RuntimeException e) {
-                failPersistedTask(persistedTask, TaskErrorCode.TASK_SUBMISSION_REJECTED.name(),
-                        TaskEventCode.TASK_FAILED.name(), "Task submission rejected");
+                if (failPersistedTask(persistedTask, TaskErrorCode.TASK_SUBMISSION_REJECTED.name(),
+                        TaskEventCode.TASK_FAILED.name(), "Task submission rejected")) {
+                    cleanupStoredTerminalResources(taskStorage.get(persistedTask.getId()).orElse(persistedTask));
+                }
                 throw e;
             }
             schedule(persistedTask, spec, context, connectInfo, extensionContext.toExecutionContext());
             return persistedTask;
+        } finally {
+            lifecycleLock.unlock();
+        }
+    }
+
+    /**
+     * Re-runs a task that startup reconciliation kept pending because it carries resume state. The
+     * stored row is reused (no create), so resume checkpoints and artifact drafts from the
+     * interrupted run stay visible to the executor.
+     */
+    <S extends TaskSpec> Task resume(Task task, S spec, Context context, ConnectInfo connectInfo) {
+        lifecycleLock.lock();
+        try {
+            if (preparingForExit) {
+                throw new RejectedExecutionException("The application is preparing to exit");
+            }
+            if (!TaskStatus.PENDING.name().equals(task.getStatus())) {
+                throw new IllegalStateException("Only a pending task can be resumed");
+            }
+            TaskSubmissionContext extensionContext = extensionContext(task, spec, connectInfo);
+            taskExtensionManager.capture(extensionContext);
+            TaskEvent resumedEvent = event(TaskEventCode.TASK_RESUMED.name(), TaskEventLevel.INFO.name(),
+                    "Task resumed from its last checkpoint");
+            resumedEvent.setTaskId(task.getId());
+            taskStorage.appendEvent(resumedEvent);
+            schedule(task, spec, context, connectInfo, extensionContext.toExecutionContext());
+            return task;
         } finally {
             lifecycleLock.unlock();
         }
@@ -173,8 +247,11 @@ public class LocalTaskManager {
                 }
                 RunningTask runningTask = runningTaskRegistry.get(task.getId());
                 if (runningTask == null) {
-                    if (failPersistedTask(task, errorCode, eventCode, message)) {
+                    if (shouldPreserveForResume(errorCode, task)) {
+                        prepareResumableTask(task);
+                    } else if (failPersistedTask(task, errorCode, eventCode, message)) {
                         tasksToCleanup.add(task.getId());
+                        cleanupStoredTerminalResources(taskStorage.get(task.getId()).orElse(task));
                     }
                     continue;
                 }
@@ -185,13 +262,36 @@ public class LocalTaskManager {
                         continue;
                     }
                     boolean wasRunning = TaskStatus.RUNNING.name().equals(currentTask.getStatus());
-                    runningTask.requestCancellation(wasRunning);
+                    boolean preserveForResume = !runningTask.isCommitPhase()
+                            && shouldPreserveForResume(errorCode, currentTask);
+                    if (preserveForResume) {
+                        runningTask.retainResourcesForResume();
+                    }
+                    boolean cancellationRequested = runningTask.requestCancellation(wasRunning);
+                    if (!cancellationRequested && runningTask.isCommitPhase()) {
+                        if (wasRunning) {
+                            tasksToAwait.add(runningTask);
+                        }
+                        continue;
+                    }
+                    if (preserveForResume) {
+                        prepareResumableTask(currentTask);
+                        if (wasRunning) {
+                            tasksToAwait.add(runningTask);
+                        } else {
+                            runningTask.close();
+                            runningTask.markFinished();
+                            runningTaskRegistry.remove(task.getId(), runningTask);
+                        }
+                        continue;
+                    }
                     if (failPersistedTask(currentTask, errorCode, eventCode, message)) {
                         tasksToCleanup.add(task.getId());
                     }
                     if (wasRunning) {
                         tasksToAwait.add(runningTask);
                     } else {
+                        runningTask.cleanupTerminalResources();
                         runningTask.close();
                         runningTask.markFinished();
                         runningTaskRegistry.remove(task.getId(), runningTask);
@@ -251,8 +351,10 @@ public class LocalTaskManager {
             return;
         }
         long afterSequence = 0L;
-        String temporaryPath = null;
-        String publishedPath = null;
+        List<String> temporaryPaths = new ArrayList<>();
+        List<String> publishedPaths = taskStorage.listArtifacts(taskId).stream()
+                .map(TaskArtifact::getArtifactId)
+                .collect(Collectors.toCollection(ArrayList::new));
         while (true) {
             List<TaskEvent> events = taskStorage.listEvents(taskId, afterSequence, TaskConstants.MAX_EVENT_LIMIT);
             if (events.isEmpty()) {
@@ -261,10 +363,13 @@ public class LocalTaskManager {
             for (TaskEvent event : events) {
                 Map<String, Object> details = event.getDetails();
                 if (TaskEventCode.ARTIFACT_PREPARED.name().equals(event.getCode())) {
-                    temporaryPath = detail(details, TaskConstants.ARTIFACT_TEMPORARY_PATH_DETAIL_KEY);
+                    temporaryPaths.add(detail(details, TaskConstants.ARTIFACT_TEMPORARY_PATH_DETAIL_KEY));
                 } else if (TaskEventCode.ARTIFACT_PUBLICATION_STARTED.name().equals(event.getCode())
                         || TaskEventCode.ARTIFACT_PUBLISHED.name().equals(event.getCode())) {
-                    publishedPath = detail(details, TaskConstants.ARTIFACT_ID_DETAIL_KEY);
+                    String publishedPath = detail(details, TaskConstants.ARTIFACT_ID_DETAIL_KEY);
+                    if (publishedPath != null && !publishedPaths.contains(publishedPath)) {
+                        publishedPaths.add(publishedPath);
+                    }
                 }
             }
             long nextSequence = events.get(events.size() - 1).getSequence();
@@ -273,7 +378,7 @@ public class LocalTaskManager {
             }
             afterSequence = nextSequence;
         }
-        if (artifactService.cleanupInterruptedArtifact(taskId, temporaryPath, publishedPath)) {
+        if (artifactService.cleanupInterruptedArtifacts(taskId, temporaryPaths, publishedPaths)) {
             TaskEvent cleanupEvent = event(TaskEventCode.ARTIFACT_CLEANUP_COMPLETED.name(),
                     TaskEventLevel.INFO.name(), "Interrupted task artifacts cleaned");
             cleanupEvent.setTaskId(taskId);
@@ -311,6 +416,11 @@ public class LocalTaskManager {
         if (spec instanceof ExportTaskSpec exportSpec && exportSpec.getTableNames() != null) {
             return exportSpec.getTableNames();
         }
+        if (spec instanceof ImportTaskSpec importSpec && importSpec.getTableSources() != null
+                && !importSpec.getTableSources().isEmpty()) {
+            return importSpec.getTableSources().stream().filter(Objects::nonNull)
+                    .map(ImportTableSource::getTableName).filter(Objects::nonNull).distinct().toList();
+        }
         if (spec instanceof ImportTaskSpec && target != null && target.getTableName() != null) {
             return List.of(target.getTableName());
         }
@@ -320,7 +430,8 @@ public class LocalTaskManager {
     private <S extends TaskSpec> void schedule(Task task, S spec, Context context, ConnectInfo connectInfo,
             TaskExecutionContext extensionContext) {
         TaskExecutor<S> taskExecutor = taskExecutorRegistry.require(spec);
-        RunningTask runningTask = new RunningTask(task.getId());
+        RunningTask runningTask = new RunningTask(task.getId(),
+                () -> taskExecutor.cleanupTerminalResources(spec, task.getId()));
         TaskSubmission<S> submission = new TaskSubmission<>(task.getId(), spec, context,
                 connectInfo == null ? null : connectInfo.copy(), extensionContext);
         TaskRunner<S> taskRunner = new TaskRunner<>(submission, runningTask, runningTaskRegistry, taskStorage,
@@ -346,6 +457,29 @@ public class LocalTaskManager {
                             .build(),
                     event(TaskEventCode.TASK_FAILED.name(), TaskEventLevel.ERROR.name(),
                             "Task submission rejected"));
+            taskStorage.get(task.getId()).filter(current -> TaskStatus.isTerminal(current.getStatus()))
+                    .ifPresent(current -> runningTask.cleanupTerminalResources());
+            throw e;
+        }
+    }
+
+    private boolean shouldPreserveForResume(String errorCode, Task task) {
+        return TaskErrorCode.APPLICATION_TERMINATED.name().equals(errorCode)
+                && task != null && !taskStorage.listResumeStates(task.getId()).isEmpty();
+    }
+
+    private void cleanupStoredTerminalResources(Task task) {
+        if (task == null || StringUtils.isBlank(task.getSpecJson())
+                || (!TaskType.DATA_FILE_IMPORT.name().equals(task.getType())
+                    && !TaskType.SQL_FILE_IMPORT.name().equals(task.getType()))) {
+            return;
+        }
+        try {
+            ImportTaskSpec spec = JSON.parseObject(task.getSpecJson(), ImportTaskSpec.class);
+            taskExecutorRegistry.require(spec).cleanupTerminalResources(spec, task.getId());
+        } catch (RuntimeException cleanupFailure) {
+            log.warn("Failed to clean persisted terminal import resources for task {}", task.getId(),
+                    cleanupFailure);
         }
     }
 
