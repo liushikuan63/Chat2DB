@@ -1,7 +1,10 @@
 package ai.chat2db.community.domain.api.service.task;
 
 import ai.chat2db.community.domain.api.model.PageResponse;
+import ai.chat2db.community.domain.api.model.task.ResumeState;
+import ai.chat2db.community.domain.api.model.task.ImportManifest;
 import ai.chat2db.community.domain.api.model.task.Task;
+import ai.chat2db.community.domain.api.model.task.TaskArtifact;
 import ai.chat2db.community.domain.api.model.task.TaskEvent;
 import ai.chat2db.community.domain.api.model.task.TaskProgress;
 import ai.chat2db.community.domain.api.model.task.TaskQuery;
@@ -16,6 +19,15 @@ public interface TaskStorage {
     Task create(Task task, TaskEvent createdEvent);
 
     Optional<Task> get(Long taskId);
+
+    /**
+     * Finds a task submitted with the client key inside the exact owner scope. Implementations must
+     * treat {@code null} user and organization IDs as values, not as wildcard filters.
+     */
+    default Optional<Task> findByClientSubmissionId(String clientSubmissionId, Long userId,
+            Long organizationId) {
+        return Optional.empty();
+    }
 
     PageResponse<Task> list(TaskQuery query);
 
@@ -40,4 +52,58 @@ public interface TaskStorage {
      * Removes a terminal task while retaining enough storage state to roll back if the coordinated commit fails.
      */
     boolean deleteTerminalTask(Long taskId, Runnable commitAction);
+
+    /**
+     * Every artifact recorded for the task, primary first. Reading a task through {@link #get(Long)}
+     * also fills {@code Task.artifacts}; this method is the standalone lookup for list and download paths.
+     */
+    List<TaskArtifact> listArtifacts(Long taskId);
+
+    /**
+     * Records one published artifact, replacing any earlier row with the same {@code artifactId}.
+     * The task must exist.
+     */
+    void saveArtifact(Long taskId, TaskArtifact artifact);
+
+    /**
+     * Forgets one artifact row without touching the file; used when a completion race is lost.
+     */
+    void deleteArtifact(Long taskId, String artifactId);
+
+    /**
+     * Non-terminal tasks that carry at least one persisted resume state and can therefore be resumed
+     * instead of being failed by startup reconciliation.
+     */
+    List<Task> listResumableTasks();
+
+    /**
+     * Stores one shard checkpoint, replacing any earlier row for the same {@code shardNo}. The task must exist.
+     */
+    void saveResumeState(Long taskId, ResumeState state);
+
+    /**
+     * Atomically replaces one persisted shard state when its current kind matches the expected
+     * kind. Manifest schedulers use this as their durable claim/complete primitive.
+     */
+    default boolean compareAndSetResumeState(Long taskId, Integer shardNo, String expectedKind,
+            ResumeState targetState) {
+        return false;
+    }
+
+    List<ResumeState> listResumeStates(Long taskId);
+
+    void clearResumeStates(Long taskId);
+
+    /**
+     * Persists a task's immutable import plan. Repeating the same manifest is idempotent; replacing
+     * it with a different fingerprint must fail so a restart cannot silently execute new shards
+     * against old checkpoints.
+     */
+    default void saveImportManifest(Long taskId, ImportManifest manifest) {
+        throw new UnsupportedOperationException("Import manifest storage is unavailable");
+    }
+
+    default Optional<ImportManifest> loadImportManifest(Long taskId) {
+        return Optional.empty();
+    }
 }

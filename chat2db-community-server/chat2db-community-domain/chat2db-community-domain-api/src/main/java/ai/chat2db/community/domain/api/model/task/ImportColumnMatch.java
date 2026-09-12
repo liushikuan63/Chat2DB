@@ -6,15 +6,17 @@ import lombok.Data;
 import lombok.NoArgsConstructor;
 
 /**
- * One explicit file-column to table-column mapping of an import.
+ * One row of the import column-mapping table: a file column and the table column it resolves to.
  */
 @Data
 @Builder
 @NoArgsConstructor
 @AllArgsConstructor
-public class ImportColumnMapping {
+public class ImportColumnMatch {
 
-    private String sourceColumn;
+    private String fileColumn;
 
-    private String targetColumn;
+    private String tableColumn;
+
+    private boolean matched;
 }
