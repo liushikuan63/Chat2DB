@@ -1,7 +1,9 @@
 package ai.chat2db.community.web.api.controller;
 
 import ai.chat2db.community.domain.api.model.PageResponse;
+import ai.chat2db.community.domain.api.model.task.ImportPreview;
 import ai.chat2db.community.domain.api.model.task.Task;
+import ai.chat2db.community.domain.api.model.task.TaskArtifact;
 import ai.chat2db.community.domain.api.model.task.TaskEvent;
 import ai.chat2db.community.domain.api.model.task.TaskQuery;
 import ai.chat2db.community.domain.api.service.task.IImportTaskSubmissionService;
@@ -16,8 +18,10 @@ import ai.chat2db.community.web.api.model.request.task.TaskEventQueryRequest;
 import ai.chat2db.community.web.api.model.request.task.TaskExportRequest;
 import ai.chat2db.community.web.api.model.request.task.TaskIdRequest;
 import ai.chat2db.community.web.api.model.request.task.TaskImportRequest;
+import ai.chat2db.community.web.api.model.request.task.TaskImportTableSourceRequest;
 import ai.chat2db.community.web.api.model.response.task.TaskSubmitResponse;
 import jakarta.validation.Valid;
+import org.apache.commons.lang3.StringUtils;
 import org.springframework.core.io.Resource;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.DeleteMapping;
@@ -28,6 +32,7 @@ import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 
 import java.util.List;
+import java.util.Objects;
 
 @ConnectionInfoAspect
 @RequestMapping("/api/tasks")
@@ -59,9 +64,42 @@ public class TaskController {
 
     @PostMapping("/import")
     public DataResult<TaskSubmitResponse> submitImport(@Valid @RequestBody TaskImportRequest request) {
+        requireStagedImportSource(request);
         Long taskId = importTaskSubmissionService.submit(
                 taskWebConverter.importRequest2spec(request), request.getFileId());
         return DataResult.of(new TaskSubmitResponse(taskId));
+    }
+
+    @PostMapping("/import/preview")
+    public DataResult<ImportPreview> previewImport(@Valid @RequestBody TaskImportRequest request) {
+        if (StringUtils.isBlank(request.getFileId())) {
+            throw new ai.chat2db.community.tools.exception.ParamBusinessException("fileId");
+        }
+        return DataResult.of(taskService.previewImport(taskWebConverter.importRequest2spec(request)));
+    }
+
+    /**
+     * Raw server paths are reserved for the JCEF desktop bridge after it has staged the selected
+     * file. HTTP callers must reference the opaque staged-file identity so they cannot make the
+     * server read arbitrary local paths.
+     */
+    private void requireStagedImportSource(TaskImportRequest request) {
+        List<TaskImportTableSourceRequest> sources = request.getTableSources();
+        boolean scoped = sources != null && sources.stream().anyMatch(Objects::nonNull);
+        if (scoped) {
+            if (sources.stream().filter(Objects::nonNull)
+                    .allMatch(source -> StringUtils.isNotBlank(source.getFileId()))) {
+                return;
+            }
+        } else if (StringUtils.isNotBlank(request.getFileId())) {
+            return;
+        }
+        throw new ai.chat2db.community.tools.exception.ParamBusinessException("fileId");
+    }
+
+    @PostMapping("/resume")
+    public DataResult<TaskSubmitResponse> resume(@RequestBody @Valid TaskIdRequest request) {
+        return DataResult.of(new TaskSubmitResponse(taskService.resume(request.getTaskId())));
     }
 
     @GetMapping("/list")
@@ -94,9 +132,16 @@ public class TaskController {
         return ActionResult.isSuccess();
     }
 
+    @GetMapping("/artifacts")
+    public DataResult<List<TaskArtifact>> artifacts(@Valid TaskIdRequest request) {
+        return DataResult.of(taskService.listArtifacts(request.getTaskId()));
+    }
+
     @GetMapping("/artifact")
     public ResponseEntity<Resource> artifact(@Valid TaskIdRequest request) {
-        return taskDownloadWebConverter.toResponse(taskService.resolveArtifact(request.getTaskId()));
+        return taskDownloadWebConverter.toResponse(StringUtils.isBlank(request.getArtifactId())
+                ? taskService.resolveArtifact(request.getTaskId())
+                : taskService.resolveArtifact(request.getTaskId(), request.getArtifactId()));
     }
 
     @GetMapping("/active-count")

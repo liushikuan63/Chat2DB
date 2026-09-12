@@ -27,6 +27,9 @@ public class I18nUtils implements InitializingBean {
     }
 
     public static String getMessage(String messageCode, @Nullable Object[] args) {
+        if (messageSourceStatic == null) {
+            return messageCode;
+        }
         try {
             return messageSourceStatic.getMessage(messageCode, args, LocaleContextHolder.getLocale());
         } catch (NoSuchMessageException e) {
@@ -35,6 +38,9 @@ public class I18nUtils implements InitializingBean {
     }
 
     public static String getMessageByLang(String messageCode, Locale locale) {
+        if (messageSourceStatic == null) {
+            return messageCode;
+        }
         try {
             return messageSourceStatic.getMessage(messageCode, null, locale);
         } catch (NoSuchMessageException e) {
