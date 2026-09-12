@@ -36,4 +36,20 @@ public class ImportTaskSpec implements TaskSpec {
     private List<ImportColumnMapping> columnMappings;
 
     private UnmappedTargetStrategy unmappedTarget;
+    /**
+     * Optional behaviour overrides (encoding, delimiters, column mapping, error tolerance).
+     */
+    private ImportOptions options;
+
+    /**
+     * Execution mode; {@code null} resolves to {@code STANDARD}.
+     */
+    private String mode;
+
+    /**
+     * Explicit operator assertion required for parallel row imports. It covers relationship and
+     * ordering semantics that metadata alone cannot prove (logical foreign keys, triggers and
+     * application-level parent/child ID dependencies); it does not bypass file-format blockers.
+     */
+    private Boolean confirmedNoStrongRelations;
 }

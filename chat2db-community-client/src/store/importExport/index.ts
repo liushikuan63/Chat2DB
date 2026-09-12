@@ -2,7 +2,6 @@ import { devtools } from 'zustand/middleware';
 import { shallow } from 'zustand/shallow';
 import { createWithEqualityFn } from 'zustand/traditional';
 import { StateCreator } from 'zustand/vanilla';
-import { IDatabaseBaseInfo } from '@/typings/database';
 import { ImportExportDataBoundInfo, ImportExportTaskDetails } from '@/typings/importExport';
 import { ACTIVE_TASK_STATUSES, ImportExportTaskStatus } from '@/constants/importExport';
 import importExportServices from '@/service/importExport';
@@ -24,7 +23,6 @@ let taskListRequestGeneration = 0;
 const taskListRequestCoordinator = createTaskListRequestCoordinator();
 
 interface ImportExportState {
-  runSqlBoundInfo: IDatabaseBaseInfo | null;
   importExportDataBoundInfo: ImportExportDataBoundInfo | null;
   taskList: ImportExportTaskDetails[];
   taskListPageSize: number;
@@ -43,7 +41,6 @@ interface ImportExportState {
 }
 
 const initialState: ImportExportState = {
-  runSqlBoundInfo: null,
   importExportDataBoundInfo: null,
   taskList: [],
   taskListPageSize: TASK_CENTER_PAGE_SIZE,
@@ -62,7 +59,6 @@ const initialState: ImportExportState = {
 };
 
 export interface ImportExportAction {
-  setRunSqlBoundInfo: (data: ImportExportState['runSqlBoundInfo']) => void;
   setImportExportDataBoundInfo: (data: ImportExportState['importExportDataBoundInfo']) => void;
   getTaskList: () => Promise<void>;
   loadMoreTasks: () => Promise<void>;
@@ -80,11 +76,6 @@ export const createImportExportAction: StateCreator<
   [],
   ImportExportAction
 > = (set, get) => ({
-  setRunSqlBoundInfo: (_runSqlBoundInfo) => {
-    set({
-      runSqlBoundInfo: _runSqlBoundInfo,
-    });
-  },
   setImportExportDataBoundInfo: (_importExportDataBoundInfo) => {
     set({
       importExportDataBoundInfo: _importExportDataBoundInfo,

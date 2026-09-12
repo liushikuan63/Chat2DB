@@ -19,6 +19,17 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 
 class TaskWebConverterTest {
 
+    @Test
+    void importPreviewPreservesStagedSourceAndNullStrategy() {
+        var request = new ai.chat2db.community.web.api.model.request.task.TaskImportRequest();
+        request.setFileId("staged-source");
+        request.setFormat("CSV");
+        request.setUnmappedTarget(ai.chat2db.community.domain.api.model.task.UnmappedTargetStrategy.NULL);
+        var result = new TaskWebConverter().importRequest2spec(request);
+        assertEquals("staged-source", result.getImportFileId());
+        assertEquals(ai.chat2db.community.domain.api.model.task.UnmappedTargetStrategy.NULL, result.getUnmappedTarget());
+    }
+
     private final TaskWebConverter converter = new TaskWebConverter();
 
     @Test
@@ -101,6 +112,7 @@ class TaskWebConverterTest {
     @Test
     void distinguishesDataAndSqlFileImports() {
         TaskImportRequest dataRequest = importRequest(TaskType.DATA_FILE_IMPORT.name());
+        dataRequest.setConfirmedNoStrongRelations(true);
         TaskImportRequest sqlRequest = importRequest(TaskType.SQL_FILE_IMPORT.name());
 
         ImportTaskSpec dataSpec = converter.importRequest2spec(dataRequest);
@@ -108,6 +120,7 @@ class TaskWebConverterTest {
 
         assertEquals("Import table data - app.public.orders", dataSpec.getTaskName());
         assertEquals("public", dataSpec.getTarget().getSchemaName());
+        assertEquals(Boolean.TRUE, dataSpec.getConfirmedNoStrongRelations());
         assertEquals("Import SQL file - app.public.orders", sqlSpec.getTaskName());
     }
 

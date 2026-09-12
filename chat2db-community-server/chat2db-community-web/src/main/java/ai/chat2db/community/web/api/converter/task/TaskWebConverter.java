@@ -40,11 +40,14 @@ public class TaskWebConverter {
                 .resultSetId(request.getResultSetId())
                 .exportSize(exportSize)
                 .format(format)
+                .compression(normalize(request.getCompression()))
                 .scope(normalize(request.getScope()))
                 .containData(request.getContainData())
                 .containsHeader(request.getContainsHeader())
                 .exportPath(request.getExportPath())
                 .suggestedFileName(request.getSuggestedFileName())
+                .checkpointRows(request.getCheckpointRows())
+                .mode(normalize(request.getMode()))
                 .build();
     }
 
@@ -59,10 +62,15 @@ public class TaskWebConverter {
                 .target(target(request.getDataSourceId(), request.getDatabaseName(), request.getSchemaName(),
                         request.getTableName()))
                 .sourceFile(sourceFile)
+                .importFileId(request.getFileId())
                 .displayFileName(StringUtils.defaultIfBlank(request.getDisplayFileName(), fileName(sourceFile)))
                 .format(format)
                 .dataTimeFormat(request.getDataTimeFormat())
                 .csvOptions(csvOptions(format, request.getCsvOptions()))
+                .options(request.getOptions())
+                .unmappedTarget(request.getUnmappedTarget())
+                .mode(normalize(request.getMode()))
+                .confirmedNoStrongRelations(request.getConfirmedNoStrongRelations())
                 .build();
     }
 
