@@ -84,3 +84,7 @@ package-lock.json
 /chat2db-community-server/latest_version.json
 .java-version
 derby.log
+/.trae/
+/.qoder/
+/.playwright-cli/
+/wiki/
