@@ -20,6 +20,46 @@ import java.util.Objects;
 import static ai.chat2db.plugin.clickhouse.constant.ClickHouseDBManagerConstants.*;
 public class ClickHouseDBManager extends DefaultDBManager implements IDbManager {
 
+    @Override
+    public ai.chat2db.spi.model.export.ExportCapability getExportCapability() {
+        return ai.chat2db.spi.model.export.ExportCapability.KEYSET_SHARDING;
+    }
+
+    @Override
+    public ai.chat2db.spi.model.imports.ImportResourceSnapshot probeImportResources(Connection connection,
+            String databaseName, String schemaName) {
+        StringBuilder evidence = new StringBuilder();
+        evidence.append("ClickHouse exposes no connection-capacity or replication view this plugin relies on, so "
+                + "connection capacity and replication status are unknown; ");
+
+        boolean triggerStatusKnown = false;
+        int triggerCount = 0;
+        String schema = ai.chat2db.spi.model.imports.ImportResourceProbes.blankToNull(schemaName);
+        if (schema == null) {
+            evidence.append("trigger metadata requires an explicit schema; ");
+        } else {
+            try {
+                triggerCount = queryCount(connection, buildTriggerCountSql(schema));
+                triggerStatusKnown = true;
+            } catch (SQLException failure) {
+                evidence.append("trigger metadata unavailable; ");
+            }
+        }
+        evidence.append("server disk free space is not exposed by ClickHouse SQL metadata");
+        return new ai.chat2db.spi.model.imports.ImportResourceSnapshot(false, 0, 0,
+                false, false, null, triggerStatusKnown, triggerCount, false, false, evidence.toString());
+    }
+
+    /** Same INFORMATION_SCHEMA.TRIGGERS view this plugin already reads for trigger metadata. */
+    static String buildTriggerCountSql(String schema) {
+        return "SELECT COUNT(*) FROM INFORMATION_SCHEMA.TRIGGERS WHERE TRIGGER_SCHEMA = '"
+                + StringUtils.defaultString(schema).replace("'", "''") + "'";
+    }
+
+    int queryCount(Connection connection, String sql) throws SQLException {
+        return ai.chat2db.spi.model.imports.ImportResourceProbes.queryCount(connection, sql);
+    }
+
 
 
 

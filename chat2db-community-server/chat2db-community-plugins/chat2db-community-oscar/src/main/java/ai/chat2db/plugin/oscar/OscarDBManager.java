@@ -22,6 +22,11 @@ import java.util.stream.Collectors;
 public class OscarDBManager extends OscarBaseDBManager {
 
     @Override
+    public ai.chat2db.spi.model.export.ExportCapability getExportCapability() {
+        return ai.chat2db.spi.model.export.ExportCapability.KEYSET_SHARDING;
+    }
+
+    @Override
     public void connectDatabase(Connection connection, String database) {
         ConnectInfo connectInfo = Chat2DBContext.getConnectInfo();
         if (ObjectUtils.anyNull(connectInfo) || StringUtils.isBlank(connectInfo.getSchemaName())) {

@@ -40,7 +40,110 @@ import static ai.chat2db.plugin.oracle.constant.OracleDBManagerConstants.*;
 @Slf4j
 public class OracleDBManager extends DefaultDBManager implements IDbManager {
 
+    @Override
+    public ai.chat2db.spi.model.export.ExportCapability getExportCapability() {
+        return ai.chat2db.spi.model.export.ExportCapability.KEYSET_SHARDING;
+    }
+    /**
+     * Consistent read for parallel export readers; the caller rolls the transaction back when the
+     * worker finishes and falls back to auto-commit reads when this statement is unsupported.
+     */
+    @Override
+    public boolean startConsistentExportSnapshot(java.sql.Connection connection) throws java.sql.SQLException {
+        try (java.sql.PreparedStatement snapshot = connection.prepareStatement(SQL_EXPORT_SNAPSHOT)) {
+            snapshot.execute();
+            return true;
+        }
+    }
 
+    private static final String SQL_EXPORT_SNAPSHOT = "SET TRANSACTION READ ONLY";
+
+    @Override
+    public ai.chat2db.spi.model.imports.ImportResourceSnapshot probeImportResources(Connection connection,
+            String databaseName, String schemaName) {
+        int maxConnections = 0;
+        int activeConnections = 0;
+        boolean connectionCapacityKnown = false;
+        StringBuilder evidence = new StringBuilder();
+        try {
+            maxConnections = queryInt(connection,
+                    "SELECT TO_NUMBER(VALUE) FROM v$parameter WHERE NAME = 'sessions'");
+            activeConnections = queryInt(connection,
+                    "SELECT COUNT(*) FROM v$session");
+            connectionCapacityKnown = maxConnections > 0;
+        } catch (SQLException failure) {
+            evidence.append("connection capacity unavailable (v$ views may need privileges); ");
+        }
+
+        boolean replicationStatusKnown = false;
+        boolean replica = false;
+        Long replicationLagSeconds = null;
+        try {
+            String role = queryString(connection,
+                    "SELECT DATABASE_ROLE FROM v$database");
+            replica = "PHYSICAL STANDBY".equalsIgnoreCase(StringUtils.trimToEmpty(role));
+            if (replica) {
+                replicationLagSeconds = queryNullableLong(
+                        connection,
+                        "SELECT GREATEST(0, CEIL((SYSDATE - VALUE) * 86400)) FROM v$dataguard_stats "
+                                + "WHERE NAME = 'apply lag'");
+            }
+            replicationStatusKnown = true;
+        } catch (SQLException failure) {
+            evidence.append("replication status unavailable; ");
+        }
+
+        boolean triggerStatusKnown = false;
+        int triggerCount = 0;
+        try {
+            String owner = resolveTriggerOwner(connection, schemaName);
+            triggerCount = queryCount(connection, buildTriggerCountSql(owner));
+            triggerStatusKnown = true;
+        } catch (SQLException failure) {
+            evidence.append("trigger metadata unavailable; ");
+        }
+        evidence.append("server disk free space is not exposed by Oracle SQL metadata");
+        return new ai.chat2db.spi.model.imports.ImportResourceSnapshot(connectionCapacityKnown, maxConnections,
+                activeConnections, replicationStatusKnown, replica, replicationLagSeconds, triggerStatusKnown,
+                triggerCount, false, false, evidence.toString());
+    }
+
+
+
+
+    /** A blank owner means "the connected schema"; scanning every schema would overstate the risk. */
+    String resolveTriggerOwner(Connection connection, String schemaName) throws SQLException {
+        String owner = blankToNull(schemaName);
+        if (owner == null) {
+            owner = queryString(connection, "SELECT SYS_CONTEXT('USERENV', 'CURRENT_SCHEMA') FROM dual");
+        }
+        return owner;
+    }
+
+    static String buildTriggerCountSql(String owner) {
+        return "SELECT COUNT(*) FROM all_triggers WHERE OWNER = '"
+                + OracleIdentifierProcessor.INSTANCE.escapeString(owner) + "'";
+    }
+
+    int queryInt(Connection connection, String sql) throws SQLException {
+        return ai.chat2db.spi.model.imports.ImportResourceProbes.queryInt(connection, sql);
+    }
+
+    String queryString(Connection connection, String sql) throws SQLException {
+        return ai.chat2db.spi.model.imports.ImportResourceProbes.queryString(connection, sql);
+    }
+
+    Long queryNullableLong(Connection connection, String sql) throws SQLException {
+        return ai.chat2db.spi.model.imports.ImportResourceProbes.queryNullableLong(connection, sql);
+    }
+
+    int queryCount(Connection connection, String sql) throws SQLException {
+        return ai.chat2db.spi.model.imports.ImportResourceProbes.queryCount(connection, sql);
+    }
+
+    static String blankToNull(String value) {
+        return ai.chat2db.spi.model.imports.ImportResourceProbes.blankToNull(value);
+    }
 
     public void exportDatabase(Connection connection, String databaseName, String schemaName, boolean containData,
             TaskExecutionContext context) throws SQLException {

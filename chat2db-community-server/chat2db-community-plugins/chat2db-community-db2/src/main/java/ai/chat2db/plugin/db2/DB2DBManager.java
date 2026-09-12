@@ -21,6 +21,11 @@ import static ai.chat2db.plugin.db2.constant.DB2DBManagerConstants.*;
 @Slf4j
 public class DB2DBManager extends DefaultDBManager implements IDbManager {
 
+    @Override
+    public ai.chat2db.spi.model.export.ExportCapability getExportCapability() {
+        return ai.chat2db.spi.model.export.ExportCapability.KEYSET_SHARDING;
+    }
+
 
 
 

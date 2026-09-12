@@ -10,11 +10,70 @@ import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.lang3.StringUtils;
 
 import java.sql.Connection;
+import java.sql.PreparedStatement;
+import java.sql.ResultSet;
 import java.sql.SQLException;
 
 import static ai.chat2db.plugin.kingbase.constant.KingBaseDBManagerConstants.*;
 @Slf4j
 public class KingBaseDBManager extends DefaultDBManager implements IDbManager {
+
+    @Override
+    public ai.chat2db.spi.model.export.ExportCapability getExportCapability() {
+        return ai.chat2db.spi.model.export.ExportCapability.KEYSET_SHARDING;
+    }
+    /**
+     * Consistent read for parallel export readers; the caller rolls the transaction back when the
+     * worker finishes and falls back to auto-commit reads when this statement is unsupported.
+     */
+    @Override
+    public boolean startConsistentExportSnapshot(java.sql.Connection connection) throws java.sql.SQLException {
+        try (java.sql.PreparedStatement snapshot = connection.prepareStatement(SQL_EXPORT_SNAPSHOT)) {
+            snapshot.execute();
+            return true;
+        }
+    }
+
+    private static final String SQL_EXPORT_SNAPSHOT = "BEGIN ISOLATION LEVEL REPEATABLE READ";
+
+    @Override
+    public ai.chat2db.spi.model.imports.ImportResourceSnapshot probeImportResources(Connection connection,
+            String databaseName, String schemaName) {
+        StringBuilder evidence = new StringBuilder();
+        evidence.append("Kingbase exposes no connection-capacity or recovery view this plugin relies on, so "
+                + "connection capacity and replication status are unknown; ");
+
+        boolean triggerStatusKnown = false;
+        int triggerCount = 0;
+        try {
+            triggerCount = queryTriggerCount(connection, schemaName);
+            triggerStatusKnown = true;
+        } catch (SQLException failure) {
+            evidence.append("trigger metadata unavailable; ");
+        }
+        evidence.append("server disk free space is not exposed by Kingbase SQL metadata");
+        return new ai.chat2db.spi.model.imports.ImportResourceSnapshot(false, 0, 0,
+                false, false, null, triggerStatusKnown, triggerCount, false, false, evidence.toString());
+    }
+
+    /** Mirrors the PostgreSQL probe: an internal trigger and a disabled trigger are not a risk. */
+    int queryTriggerCount(Connection connection, String schemaName) throws SQLException {
+        try (PreparedStatement statement = connection.prepareStatement(
+                "SELECT COUNT(*) FROM pg_trigger t "
+                        + "JOIN pg_class c ON c.oid = t.tgrelid "
+                        + "JOIN pg_namespace n ON n.oid = c.relnamespace "
+                        + "WHERE NOT t.tgisinternal AND t.tgenabled <> 'D' "
+                        + "AND n.nspname = COALESCE(?, current_schema())")) {
+            statement.setString(1, StringUtils.trimToNull(schemaName));
+            try (ResultSet rows = statement.executeQuery()) {
+                if (!rows.next()) {
+                    throw new SQLException("Trigger probe returned no rows");
+                }
+                return rows.getInt(1);
+            }
+        }
+    }
+
 
 
 

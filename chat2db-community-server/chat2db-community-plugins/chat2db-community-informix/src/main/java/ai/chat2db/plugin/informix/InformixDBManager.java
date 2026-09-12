@@ -11,6 +11,22 @@ import java.sql.Connection;
 @Slf4j
 public class InformixDBManager extends GenericDBManager implements IDbManager {
 
+    /**
+     * This plugin relies on no session, replication or trigger catalog object, and the exact
+     * sysmaster view names for session limits and triggers have not been verified against a live
+     * instance, so this probe issues no unverified query and reports the unknown with its reason
+     * instead of guessing SQL. Informix also exposes no server disk free space through SQL.
+     */
+    @Override
+    public ai.chat2db.spi.model.imports.ImportResourceSnapshot probeImportResources(Connection connection,
+            String databaseName, String schemaName) {
+        return ai.chat2db.spi.model.imports.ImportResourceSnapshot.unknown(
+                "Informix: this plugin relies on no session, replication or trigger catalog object, and "
+                        + "the sysmaster view names for session limits and triggers are not verified "
+                        + "against a live instance, so this probe issues no unverified queries; server "
+                        + "disk free space is not exposed through Informix SQL");
+    }
+
     @Override
     public Connection getConnection(ConnectInfo connectInfo) {
         String url = connectInfo.getUrl();

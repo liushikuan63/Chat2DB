@@ -20,6 +20,57 @@ import static ai.chat2db.plugin.h2.constant.H2DBManagerConstants.*;
 @Slf4j
 public class H2DBManager extends DefaultDBManager implements IDbManager {
 
+    @Override
+    public ai.chat2db.spi.model.export.ExportCapability getExportCapability() {
+        return ai.chat2db.spi.model.export.ExportCapability.KEYSET_SHARDING;
+    }
+
+    @Override
+    public ai.chat2db.spi.model.imports.ImportResourceSnapshot probeImportResources(Connection connection,
+            String databaseName, String schemaName) {
+        boolean triggerStatusKnown = false;
+        int triggerCount = 0;
+        StringBuilder evidence = new StringBuilder();
+        evidence.append("H2 is embedded, so connection capacity and replication status do not apply; ");
+        try {
+            triggerCount = queryTriggerCount(connection, schemaName);
+            triggerStatusKnown = true;
+        } catch (SQLException failure) {
+            evidence.append("trigger metadata unavailable; ");
+        }
+        evidence.append("server disk free space is not exposed by H2 SQL metadata");
+        return new ai.chat2db.spi.model.imports.ImportResourceSnapshot(false, 0, 0,
+                false, false, null, triggerStatusKnown, triggerCount, false, false, evidence.toString());
+    }
+
+    int queryTriggerCount(Connection connection, String schemaName) throws SQLException {
+        return queryCount(connection,
+                "SELECT COUNT(*) FROM INFORMATION_SCHEMA.TRIGGERS WHERE TRIGGER_SCHEMA = "
+                        + "COALESCE(" + sqlLiteral(schemaName) + ", SCHEMA())");
+    }
+
+    int queryCount(Connection connection, String sql) throws SQLException {
+        return ai.chat2db.spi.model.imports.ImportResourceProbes.queryCount(connection, sql);
+    }
+
+    int queryInt(Connection connection, String sql) throws SQLException {
+        return ai.chat2db.spi.model.imports.ImportResourceProbes.queryInt(connection, sql);
+    }
+
+    String queryString(Connection connection, String sql) throws SQLException {
+        return ai.chat2db.spi.model.imports.ImportResourceProbes.queryString(connection, sql);
+    }
+
+    Long queryNullableLong(Connection connection, String sql) throws SQLException {
+        return ai.chat2db.spi.model.imports.ImportResourceProbes.queryNullableLong(connection, sql);
+    }
+
+    private static String sqlLiteral(String value) {
+        if (StringUtils.isBlank(value)) {
+            return "NULL";
+        }
+        return "'" + value.replace("'", "''") + "'";
+    }
 
 
     @Override

@@ -32,6 +32,111 @@ import static cn.hutool.core.date.DatePattern.NORM_DATETIME_PATTERN;
 @Slf4j
 public class SqlServerDBManager extends DefaultDBManager implements IDbManager {
 
+    @Override
+    public ai.chat2db.spi.model.export.ExportCapability getExportCapability() {
+        return ai.chat2db.spi.model.export.ExportCapability.KEYSET_SHARDING;
+    }
+    /**
+     * Consistent read for parallel export readers; the caller rolls the transaction back when the
+     * worker finishes and falls back to auto-commit reads when this statement is unsupported.
+     */
+    @Override
+    public boolean startConsistentExportSnapshot(java.sql.Connection connection) throws java.sql.SQLException {
+        try (java.sql.PreparedStatement snapshot = connection.prepareStatement(SQL_EXPORT_SNAPSHOT)) {
+            snapshot.execute();
+            return true;
+        }
+    }
+
+    private static final String SQL_EXPORT_SNAPSHOT = "SET TRANSACTION ISOLATION LEVEL SNAPSHOT";
+
+    @Override
+    public ai.chat2db.spi.model.imports.ImportResourceSnapshot probeImportResources(Connection connection,
+            String databaseName, String schemaName) {
+        int maxConnections = 0;
+        int activeConnections = 0;
+        boolean connectionCapacityKnown = false;
+        StringBuilder evidence = new StringBuilder();
+        try {
+            maxConnections = queryInt(connection,
+                    "SELECT CAST(max_connections AS INT) FROM sys.dm_os_sys_info");
+            activeConnections = queryInt(connection,
+                    "SELECT COUNT(*) FROM sys.dm_exec_sessions WHERE is_user_process = 1");
+            connectionCapacityKnown = maxConnections > 0;
+        } catch (SQLException failure) {
+            evidence.append("connection capacity unavailable (DMVs may need VIEW SERVER STATE); ");
+        }
+
+        boolean replicationStatusKnown = false;
+        boolean replica = false;
+        Long replicationLagSeconds = null;
+        try {
+            String hadrEnabled = queryString(connection,
+                    "SELECT CAST(SERVERPROPERTY('IsHadrEnabled') AS NVARCHAR(10))");
+            if ("1".equals(StringUtils.trimToEmpty(hadrEnabled))) {
+                String role = queryString(connection,
+                        "SELECT CAST(role_desc AS NVARCHAR(20)) FROM sys.dm_hadr_availability_replica_states "
+                                + "WHERE is_local = 1");
+                replica = "SECONDARY".equalsIgnoreCase(StringUtils.trimToEmpty(role));
+                if (replica) {
+                    replicationLagSeconds = queryNullableLong(
+                            connection,
+                            "SELECT MAX(DATEDIFF(SECOND, last_redone_time, GETDATE())) "
+                                    + "FROM sys.dm_hadr_database_replica_states WHERE is_local = 1");
+                }
+            }
+            replicationStatusKnown = true;
+        } catch (SQLException failure) {
+            evidence.append("replication status unavailable; ");
+        }
+
+        boolean triggerStatusKnown = false;
+        int triggerCount = 0;
+        try {
+            triggerCount = queryCount(connection, buildTriggerCountSql(schemaName));
+            triggerStatusKnown = true;
+        } catch (SQLException failure) {
+            evidence.append("trigger metadata unavailable; ");
+        }
+        evidence.append("server disk free space is not exposed by SQL Server SQL metadata");
+        return new ai.chat2db.spi.model.imports.ImportResourceSnapshot(connectionCapacityKnown, maxConnections,
+                activeConnections, replicationStatusKnown, replica, replicationLagSeconds, triggerStatusKnown,
+                triggerCount, false, false, evidence.toString());
+    }
+
+    /**
+     * Counts enabled DML triggers, optionally scoped to one schema. A blank schema counts every user
+     * trigger; a named one is escaped so a quote cannot terminate the literal.
+     */
+    static String buildTriggerCountSql(String schemaName) {
+        String schema = blankToNull(schemaName);
+        String filter = schema == null ? "" : " AND s.name = '" + schema.replace("'", "''") + "'";
+        return "SELECT COUNT(*) FROM sys.triggers t JOIN sys.objects o ON o.object_id = t.parent_id "
+                + "JOIN sys.schemas s ON s.schema_id = o.schema_id "
+                + "WHERE t.is_disabled = 0 AND t.parent_class = 1" + filter;
+    }
+
+
+    int queryInt(Connection connection, String sql) throws SQLException {
+        return ai.chat2db.spi.model.imports.ImportResourceProbes.queryInt(connection, sql);
+    }
+
+    String queryString(Connection connection, String sql) throws SQLException {
+        return ai.chat2db.spi.model.imports.ImportResourceProbes.queryString(connection, sql);
+    }
+
+    Long queryNullableLong(Connection connection, String sql) throws SQLException {
+        return ai.chat2db.spi.model.imports.ImportResourceProbes.queryNullableLong(connection, sql);
+    }
+
+    int queryCount(Connection connection, String sql) throws SQLException {
+        return ai.chat2db.spi.model.imports.ImportResourceProbes.queryCount(connection, sql);
+    }
+
+    static String blankToNull(String value) {
+        return ai.chat2db.spi.model.imports.ImportResourceProbes.blankToNull(value);
+    }
+
     private static final Pattern GO_BATCH_LINE = Pattern.compile("(?i)^\\s*go\\s*;?\\s*(?:--.*)?$");
     private static final Pattern GO_EXTENDED_PROPERTY_LINE = Pattern.compile(
             "(?i)^\\s*go\\s*;?\\s+(exec\\s+sp_addextendedproperty\\b.*)$");

@@ -33,6 +33,74 @@ import static ai.chat2db.plugin.dm.constant.DMDBManagerConstants.*;
 @Slf4j
 public class DMDBManager extends DefaultDBManager implements IDbManager {
 
+    @Override
+    public ai.chat2db.spi.model.export.ExportCapability getExportCapability() {
+        return ai.chat2db.spi.model.export.ExportCapability.KEYSET_SHARDING;
+    }
+
+    @Override
+    public ai.chat2db.spi.model.imports.ImportResourceSnapshot probeImportResources(Connection connection,
+            String databaseName, String schemaName) {
+        int maxConnections = 0;
+        int activeConnections = 0;
+        boolean connectionCapacityKnown = false;
+        StringBuilder evidence = new StringBuilder();
+        try {
+            maxConnections = queryInt(connection,
+                    "SELECT PARA_VALUE FROM V$DM_INI WHERE PARA_NAME = 'MAX_SESSIONS'");
+            activeConnections = queryInt(connection, "SELECT COUNT(*) FROM V$SESSIONS");
+            connectionCapacityKnown = maxConnections > 0;
+        } catch (SQLException failure) {
+            evidence.append("connection capacity unavailable (V$ views may need DBA privileges); ");
+        }
+
+        evidence.append("replication status is not exposed by a DM view this plugin relies on; ");
+
+        boolean triggerStatusKnown = false;
+        int triggerCount = 0;
+        try {
+            String owner = resolveTriggerOwner(connection, schemaName);
+            triggerCount = queryCount(connection, buildTriggerCountSql(owner));
+            triggerStatusKnown = true;
+        } catch (SQLException failure) {
+            evidence.append("trigger metadata unavailable; ");
+        }
+        evidence.append("server disk free space is not exposed by DM SQL metadata");
+        return new ai.chat2db.spi.model.imports.ImportResourceSnapshot(connectionCapacityKnown, maxConnections,
+                activeConnections, false, false, null, triggerStatusKnown,
+                triggerCount, false, false, evidence.toString());
+    }
+
+    /** A blank owner means "the connected schema"; scanning every owner would overstate the risk. */
+    String resolveTriggerOwner(Connection connection, String schemaName) throws SQLException {
+        String owner = ai.chat2db.spi.model.imports.ImportResourceProbes.blankToNull(schemaName);
+        if (owner == null) {
+            owner = queryString(connection, "SELECT SF_GET_SCHEMA_NAME_BY_ID(CURRENT_SCHID())");
+        }
+        return owner;
+    }
+
+    static String buildTriggerCountSql(String owner) {
+        return "SELECT COUNT(*) FROM ALL_TRIGGERS WHERE OWNER = '"
+                + StringUtils.defaultString(owner).replace("'", "''") + "'";
+    }
+
+    int queryInt(Connection connection, String sql) throws SQLException {
+        return ai.chat2db.spi.model.imports.ImportResourceProbes.queryInt(connection, sql);
+    }
+
+    String queryString(Connection connection, String sql) throws SQLException {
+        return ai.chat2db.spi.model.imports.ImportResourceProbes.queryString(connection, sql);
+    }
+
+    Long queryNullableLong(Connection connection, String sql) throws SQLException {
+        return ai.chat2db.spi.model.imports.ImportResourceProbes.queryNullableLong(connection, sql);
+    }
+
+    int queryCount(Connection connection, String sql) throws SQLException {
+        return ai.chat2db.spi.model.imports.ImportResourceProbes.queryCount(connection, sql);
+    }
+
 
 
 

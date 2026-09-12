@@ -6,11 +6,46 @@ import ai.chat2db.plugin.oscar.util.OscarUtils;
 import ai.chat2db.spi.DefaultDBManager;
 import ai.chat2db.community.domain.api.model.metadata.Procedure;
 import ai.chat2db.spi.DefaultSQLExecutor;
+import org.apache.commons.lang3.StringUtils;
 
 import java.sql.Connection;
 import java.sql.SQLException;
 
 public abstract class OscarBaseDBManager extends DefaultDBManager {
+
+    @Override
+    public ai.chat2db.spi.model.imports.ImportResourceSnapshot probeImportResources(Connection connection,
+            String databaseName, String schemaName) {
+        StringBuilder evidence = new StringBuilder();
+        evidence.append("Oscar exposes no session, process or parameter view this plugin relies on, so connection "
+                + "capacity and replication status are unknown; ");
+
+        boolean triggerStatusKnown = false;
+        int triggerCount = 0;
+        String owner = ai.chat2db.spi.model.imports.ImportResourceProbes.blankToNull(schemaName);
+        if (owner == null) {
+            evidence.append("trigger metadata requires an explicit owner; ");
+        } else {
+            try {
+                triggerCount = queryCount(connection, buildTriggerCountSql(owner));
+                triggerStatusKnown = true;
+            } catch (SQLException failure) {
+                evidence.append("trigger metadata unavailable; ");
+            }
+        }
+        evidence.append("server disk free space is not exposed by Oscar SQL metadata");
+        return new ai.chat2db.spi.model.imports.ImportResourceSnapshot(false, 0, 0,
+                false, false, null, triggerStatusKnown, triggerCount, false, false, evidence.toString());
+    }
+
+    static String buildTriggerCountSql(String owner) {
+        return "SELECT COUNT(*) FROM ALL_TRIGGERS WHERE OWNER = '"
+                + StringUtils.defaultString(owner).replace("'", "''") + "'";
+    }
+
+    int queryCount(Connection connection, String sql) throws SQLException {
+        return ai.chat2db.spi.model.imports.ImportResourceProbes.queryCount(connection, sql);
+    }
 
     @Override
     public String dropTable(Connection connection, String databaseName, String schemaName, String tableName) {

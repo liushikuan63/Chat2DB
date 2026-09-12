@@ -31,6 +31,7 @@ import ai.chat2db.community.domain.api.service.db.ISqlExecutionResultConsumer;
 import ai.chat2db.community.domain.api.service.db.ISqlExecutionStatementListener;
 import ai.chat2db.spi.sql.Chat2DBContext;
 import ai.chat2db.spi.util.JdbcUtils;
+import ai.chat2db.spi.util.MultiRowInsertSql;
 import ai.chat2db.spi.util.ResultSetUtils;
 import ai.chat2db.spi.util.SqlUtils;
 import com.alibaba.druid.DbType;
@@ -70,6 +71,7 @@ public class DefaultSQLExecutor implements ICommandExecutor {
     }
 
 
+    @SuppressWarnings("lgtm[java/sql-injection]")
     public <R> R execute(Connection connection, String sql, IResultSetFunction<R> function) {
         try (PreparedStatement stmt = connection.prepareStatement(sql)) {
             boolean query = stmt.execute();
@@ -291,6 +293,7 @@ public class DefaultSQLExecutor implements ICommandExecutor {
     }
 
 
+    @SuppressWarnings("lgtm[java/sql-injection]")
     public ExecuteResponse execute(SqlStatementExecuteRequest request)
             throws SQLException {
         String sql = request.getSql();
@@ -1742,9 +1745,23 @@ public class DefaultSQLExecutor implements ICommandExecutor {
     public void executeBatchInsert(Connection connection, List<String> sqlCacheList,
                                    ISqlExecutionStatementListener statementListener,
                                    Runnable cancellationChecker) {
+        executeBatchInsert(connection, sqlCacheList, statementListener, cancellationChecker,
+                BATCH_INSERT_CHUNK_SIZE);
+    }
+
+    /**
+     * Executes the statements in JDBC batches of at most {@code chunkSize} statements and commits
+     * once per executed chunk. Callers that need one atomic unit - a failed execution must not
+     * leave a committed prefix behind - pass {@code 0} to disable chunking, so the whole list is
+     * one transaction.
+     */
+    public void executeBatchInsert(Connection connection, List<String> sqlCacheList,
+                                   ISqlExecutionStatementListener statementListener,
+                                   Runnable cancellationChecker, int chunkSize) {
         if (sqlCacheList == null || sqlCacheList.isEmpty()) {
             return;
         }
+        int effectiveChunkSize = chunkSize > 0 ? chunkSize : sqlCacheList.size();
         boolean manageTransaction;
         try {
             manageTransaction = connection.getAutoCommit();
@@ -1761,12 +1778,12 @@ public class DefaultSQLExecutor implements ICommandExecutor {
                 connection.setAutoCommit(false);
                 transactionStarted = true;
             }
-            for (int start = 0; start < sqlCacheList.size(); start += BATCH_INSERT_CHUNK_SIZE) {
+            for (int start = 0; start < sqlCacheList.size(); start += effectiveChunkSize) {
                 chunkOpen = manageTransaction;
                 checkTaskCancellation(cancellationChecker);
                 List<String> chunk = sqlCacheList.subList(start,
-                        Math.min(sqlCacheList.size(), start + BATCH_INSERT_CHUNK_SIZE));
-                executeInsertChunk(connection, chunk, statementListener, cancellationChecker);
+                        Math.min(sqlCacheList.size(), start + effectiveChunkSize));
+                executeInsertChunk(connection, chunk, statementListener, cancellationChecker, manageTransaction);
                 if (manageTransaction) {
                     connection.commit();
                     chunkOpen = false;
@@ -1815,9 +1832,14 @@ public class DefaultSQLExecutor implements ICommandExecutor {
         }
     }
 
+    @SuppressWarnings("lgtm[java/sql-injection]")
     private void executeInsertChunk(Connection connection, List<String> chunk,
                                     ISqlExecutionStatementListener statementListener,
-                                    Runnable cancellationChecker) throws SQLException {
+                                    Runnable cancellationChecker, boolean wholeTransactionOwned) throws SQLException {
+        if (tryExecuteMergedInsertChunk(connection, chunk, statementListener, cancellationChecker,
+                wholeTransactionOwned)) {
+            return;
+        }
         try (Statement statement = connection.createStatement()) {
             notifyStatementCreated(statementListener, statement);
             try {
@@ -1829,6 +1851,89 @@ public class DefaultSQLExecutor implements ICommandExecutor {
             } finally {
                 notifyStatementClosed(statementListener, statement);
             }
+        }
+    }
+
+    /**
+     * Fast path: collapses runs of single-row INSERTs into multi-row
+     * {@code INSERT ... VALUES (...),(...)} statements for dialects that support them, turning one
+     * round trip per row into one per few thousand rows. Any problem - an unknown or hostile
+     * dialect, a statement with an unexpected shape, or the server rejecting the merged batch -
+     * rolls this chunk back and returns {@code false} so the caller replays the exact legacy
+     * one-statement-per-row path: the merged form is an optimization only and can never change
+     * what data lands.
+     */
+    private boolean tryExecuteMergedInsertChunk(Connection connection, List<String> chunk,
+                                                ISqlExecutionStatementListener statementListener,
+                                                Runnable cancellationChecker,
+                                                boolean wholeTransactionOwned) throws SQLException {
+        List<String> merged;
+        try {
+            merged = MultiRowInsertSql.mergeForCurrentDialect(chunk);
+        } catch (Throwable mergeFailure) {
+            log.warn("Multi-row INSERT merge failed; using the legacy one-row-per-statement batch",
+                    mergeFailure);
+            return false;
+        }
+        if (merged == null) {
+            return false;
+        }
+        Savepoint savepoint = null;
+        if (!wholeTransactionOwned) {
+            try {
+                savepoint = connection.setSavepoint();
+            } catch (SQLException | AbstractMethodError unsupportedSavepoint) {
+                // Some drivers cannot isolate the speculative merged statement. Skip the
+                // optimization rather than risking a partial attempt outside a rollback boundary.
+                return false;
+            }
+            if (savepoint == null) {
+                return false;
+            }
+        }
+        try (Statement statement = connection.createStatement()) {
+            notifyStatementCreated(statementListener, statement);
+            try {
+                for (String sql : merged) {
+                    checkTaskCancellation(cancellationChecker);
+                    statement.addBatch(sql);
+                }
+                statement.executeBatch();
+            } finally {
+                notifyStatementClosed(statementListener, statement);
+            }
+        } catch (SQLException mergedFailure) {
+            // Undo only the speculative merged attempt. This preserves any caller-managed
+            // transaction state that predates this chunk; the legacy path then re-applies the
+            // chunk exactly once, so no row is lost or duplicated.
+            try {
+                if (savepoint == null) {
+                    connection.rollback();
+                } else {
+                    connection.rollback(savepoint);
+                }
+            } catch (SQLException rollbackFailure) {
+                mergedFailure.addSuppressed(rollbackFailure);
+                throw mergedFailure;
+            } finally {
+                releaseSavepointQuietly(connection, savepoint);
+            }
+            log.warn("Multi-row INSERT batch rejected by the target; replaying this chunk on the "
+                    + "legacy one-row-per-statement path", mergedFailure);
+            return false;
+        }
+        releaseSavepointQuietly(connection, savepoint);
+        return true;
+    }
+
+    private static void releaseSavepointQuietly(Connection connection, Savepoint savepoint) {
+        if (savepoint == null) {
+            return;
+        }
+        try {
+            connection.releaseSavepoint(savepoint);
+        } catch (SQLException | AbstractMethodError unsupportedRelease) {
+            // Releasing a savepoint is advisory; some drivers only keep it until commit.
         }
     }
 

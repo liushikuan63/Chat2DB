@@ -13,10 +13,66 @@ import java.sql.PreparedStatement;
 import static ai.chat2db.plugin.sqlite.constant.SqliteDBManagerConstants.*;
 public class SqliteDBManager extends DefaultDBManager implements IDbManager {
 
+    @Override
+    public ai.chat2db.spi.model.export.ExportCapability getExportCapability() {
+        return ai.chat2db.spi.model.export.ExportCapability.KEYSET_SHARDING;
+    }
+    /**
+     * Consistent read for parallel export readers; the caller rolls the transaction back when the
+     * worker finishes and falls back to auto-commit reads when this statement is unsupported.
+     */
+    @Override
+    public boolean startConsistentExportSnapshot(java.sql.Connection connection) throws java.sql.SQLException {
+        try (java.sql.PreparedStatement snapshot = connection.prepareStatement(SQL_EXPORT_SNAPSHOT)) {
+            snapshot.execute();
+            return true;
+        }
+    }
+
+    private static final String SQL_EXPORT_SNAPSHOT = "BEGIN";
+
+    @Override
+    public ai.chat2db.spi.model.imports.ImportResourceSnapshot probeImportResources(Connection connection,
+            String databaseName, String schemaName) {
+        boolean triggerStatusKnown = false;
+        int triggerCount = 0;
+        StringBuilder evidence = new StringBuilder();
+        evidence.append("SQLite is embedded and single-writer, so connection capacity and replication "
+                + "status do not apply; ");
+        try {
+            triggerCount = queryCount(connection, buildTriggerCountSql(schemaName));
+            triggerStatusKnown = true;
+        } catch (SQLException failure) {
+            evidence.append("trigger metadata unavailable; ");
+        }
+        evidence.append("server disk free space is not exposed by SQLite SQL metadata");
+        return new ai.chat2db.spi.model.imports.ImportResourceSnapshot(false, 0, 0,
+                false, false, null, triggerStatusKnown, triggerCount, false, false, evidence.toString());
+    }
+
+    /**
+     * A blank table name counts every trigger; a named one is escaped so a quote in the name cannot
+     * terminate the literal and turn the probe into a second statement.
+     */
+    static String buildTriggerCountSql(String tableName) {
+        String table = blankToNull(tableName);
+        String filter = table == null ? "" : " AND tbl_name = '" + table.replace("'", "''") + "'";
+        return "SELECT COUNT(*) FROM sqlite_master WHERE type = 'trigger'" + filter;
+    }
 
 
 
 
+
+
+
+    int queryCount(Connection connection, String sql) throws SQLException {
+        return ai.chat2db.spi.model.imports.ImportResourceProbes.queryCount(connection, sql);
+    }
+
+    static String blankToNull(String value) {
+        return ai.chat2db.spi.model.imports.ImportResourceProbes.blankToNull(value);
+    }
 
     @Override
     public void exportDatabase(Connection connection, String databaseName, String schemaName, boolean containData,

@@ -15,6 +15,28 @@ import java.util.Set;
 @Slf4j
 public class BigQueryDBManager extends DefaultDBManager implements IDbManager {
 
+    @Override
+    public ai.chat2db.spi.model.export.ExportCapability getExportCapability() {
+        return ai.chat2db.spi.model.export.ExportCapability.KEYSET_SHARDING;
+    }
+
+    /**
+     * BigQuery is serverless: there is no fixed connection pool or replication lag to read, and it
+     * has no row-level DML triggers. Its job-metadata views would need a project- and
+     * region-qualified name whose exact syntax has not been verified against a live instance, so
+     * this probe deliberately issues no unverified query and reports the unknown with its reason.
+     */
+    @Override
+    public ai.chat2db.spi.model.imports.ImportResourceSnapshot probeImportResources(Connection connection,
+            String databaseName, String schemaName) {
+        return ai.chat2db.spi.model.imports.ImportResourceSnapshot.unknown(
+                "BigQuery is serverless, so there is no fixed connection pool or replication lag to "
+                        + "read and no row-level DML triggers; its job views require a project- and "
+                        + "region-qualified name whose exact syntax is not verified against a live "
+                        + "instance, and this probe does not issue unverified queries; server storage "
+                        + "capacity is not exposed as a per-import admission fact");
+    }
+
     /**
      * Keys this manager injects into extendInfo. A reconnect reuses the same
      * ConnectInfo instance, so these must be stripped first to avoid duplicates.

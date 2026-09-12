@@ -14,6 +14,22 @@ public class GBase8sDBManager extends GenericDBManager implements IDbManager {
     private static final String URL_PREFIX = "jdbc:gbasedbt-sqli://";
     private static final String SERVER_ATTRIBUTE = "GBASEDBTSERVER";
 
+    /**
+     * GBase 8s is driven here through its Informix-derived JDBC driver, and this plugin relies on no
+     * session, replication or trigger catalog object. The exact sysmaster view names for session
+     * limits and triggers have not been verified against a live instance, so this probe issues no
+     * unverified query and reports the unknown with its reason instead of guessing SQL.
+     */
+    @Override
+    public ai.chat2db.spi.model.imports.ImportResourceSnapshot probeImportResources(Connection connection,
+            String databaseName, String schemaName) {
+        return ai.chat2db.spi.model.imports.ImportResourceSnapshot.unknown(
+                "GBase 8s is accessed through its Informix-derived driver and this plugin relies on no "
+                        + "session, replication or trigger catalog object; the sysmaster view names for "
+                        + "session limits and triggers are not verified against a live instance, and "
+                        + "this probe does not issue unverified queries");
+    }
+
     @Override
     public Connection getConnection(ConnectInfo connectInfo) {
         connectInfo.setUrl(appendServerAttributeIfAbsent(connectInfo.getUrl(), connectInfo.getServiceName()));

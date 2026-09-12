@@ -17,6 +17,29 @@ import java.util.List;
 import static ai.chat2db.plugin.snowflake.constant.SnowflakeDBManagerConstants.*;
 public class SnowflakeDBManager extends DefaultDBManager implements IDbManager {
 
+    @Override
+    public ai.chat2db.spi.model.export.ExportCapability getExportCapability() {
+        return ai.chat2db.spi.model.export.ExportCapability.KEYSET_SHARDING;
+    }
+
+    /**
+     * Snowflake's unknowns are deliberate. Its account-usage warehouse load view is documented to lag
+     * by up to three hours and to aggregate into five-minute intervals, so it cannot answer whether
+     * there is headroom right now; answering "known" from stale data would be worse than admitting
+     * the unknown. Snowflake also has no replication-lag view usable for this decision, no row-level
+     * DML triggers, and no SQL-exposed server disk free space.
+     */
+    @Override
+    public ai.chat2db.spi.model.imports.ImportResourceSnapshot probeImportResources(Connection connection,
+            String databaseName, String schemaName) {
+        return ai.chat2db.spi.model.imports.ImportResourceSnapshot.unknown(
+                "Snowflake resource views cannot answer a pre-import admission decision: the "
+                        + "account-usage warehouse load view lags by up to 3 hours and aggregates into "
+                        + "5-minute intervals, so it cannot report current headroom; there is no "
+                        + "replication-lag view usable for this decision; Snowflake has no row-level "
+                        + "DML triggers; and server disk free space is not exposed through Snowflake SQL");
+    }
+
 
 
 
