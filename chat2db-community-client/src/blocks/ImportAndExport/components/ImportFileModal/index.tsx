@@ -1,41 +1,54 @@
 import { memo, useEffect, useRef, useState } from 'react';
-import { Modal, IconfontSvg } from '@chat2db/ui';
-import { Button } from 'antd';
+import { Modal } from '@chat2db/ui';
+import { Button, Dropdown, type MenuProps } from 'antd';
 import i18n from '@/i18n';
 import ImportExportFile, { ImportExportFileRef } from '../ImportExportFile';
+import MultiTableImportWizard from '../MultiTableImportWizard';
 import { useImportExportStore } from '@/store/importExport';
 import ModalFooterButton from '@/components/Modal/ModalFooterButton';
-import importExportServices from '@/service/importExport';
-import { ImportExportTaskStatus, ImportExportType } from '@/constants/importExport';
+import importExportServices, {
+  artifactDownloadUrl,
+  type ExportTaskParams,
+  type ImportTaskParams,
+} from '@/service/importExport';
+import { ImportExportFileType, ImportExportTaskStatus, ImportExportType } from '@/constants/importExport';
 import Log from '@/blocks/ImportAndExport/components/Log';
 import { ImportExportTaskDetails } from '@/typings/importExport';
-import ImportMappingContent from '@/blocks/ImportAndExport/components/ImportMappingContent';
 import jcefApi from '@/jcef';
 import { isDesktop } from '@/utils/env';
-import sqlService from '@/service/sql';
-import { prepareWebImportParams } from './submission';
 import {
   IMPORT_TARGET_TABLE_REFRESH_EVENT,
   shouldRefreshImportTargetTable,
 } from '@/store/importExport/taskCenterUtils';
-import type { FileUrl } from '@/components/UploadLocalFile';
+import {
+  createClientSubmissionId,
+  getServerStagedImportFileIds,
+  hasServerStagedImportFiles,
+  importSubmissionIdentityAfterFailure,
+  isUnknownSubmissionResponse,
+  prepareImportSubmission,
+  type ImportSubmissionIdentity,
+} from './submission';
+import { Download, FolderOpen } from 'lucide-react';
+import {
+  getDownloadableTaskArtifacts,
+  shouldShowLegacyPrimaryArtifact,
+} from '../LogModal/artifactVisibility';
 
 interface IProps {
   className?: string;
 }
 
-const isPreviewFile = (file?: FileUrl) => {
-  const name = (file?.fileName || file?.file?.name)?.toLowerCase();
-  return name?.endsWith('.csv') || name?.endsWith('.xls') || name?.endsWith('.xlsx');
-};
-
 export default memo<IProps>((_props) => {
   const [isReady, setIsReady] = useState(false);
   const importExportFileRef = useRef<ImportExportFileRef>(null);
-  const previousTaskDetailsRef = useRef<ImportExportTaskDetails>();
   const [taskId, setTaskId] = useState<number>();
   const [taskDetails, setTaskDetails] = useState<ImportExportTaskDetails>();
-  const [importFile, setImportFile] = useState<FileUrl>();
+  const previousTaskDetailsRef = useRef<ImportExportTaskDetails>();
+  const submittedImportTargetsRef = useRef<Array<NonNullable<ImportExportTaskDetails['target']>>>([]);
+  const submissionGenerationRef = useRef(0);
+  const importSubmissionIdentityRef = useRef<ImportSubmissionIdentity>();
+  const [submitting, setSubmitting] = useState(false);
 
   const { importExportDataBoundInfo, setImportExportDataBoundInfo, getTaskList } = useImportExportStore((state) => {
     return {
@@ -47,33 +60,81 @@ export default memo<IProps>((_props) => {
 
   useEffect(() => {
     if (!importExportDataBoundInfo) {
+      setIsReady(false);
       setTaskId(undefined);
       setTaskDetails(undefined);
       previousTaskDetailsRef.current = undefined;
-      setImportFile(undefined);
+      submittedImportTargetsRef.current = [];
+      importSubmissionIdentityRef.current = undefined;
     }
   }, [importExportDataBoundInfo]);
 
-  const handleRunSQl = async () => {
-    const params = importExportFileRef.current?.getValues();
+  const handleRunSQl = () => {
+    if (submitting) return;
+    const importing = importExportDataBoundInfo?.type === ImportExportType.IMPORT;
+    const proposedClientSubmissionId = importing
+      ? importSubmissionIdentityRef.current?.clientSubmissionId || createClientSubmissionId()
+      : undefined;
+    const params = importExportFileRef.current?.getValues(proposedClientSubmissionId);
     if (!params) return;
-    let response;
-    if ('sourceFile' in params) {
-      let importParams = params;
-      if (!isDesktop) {
-        if (!importFile?.file) return;
-        importParams = await prepareWebImportParams(importParams, importFile.file, sqlService.uploadImportFile);
-      }
-      response = await importExportServices.submitImport(importParams);
+    setSubmitting(true);
+    const isImportRequest = params.taskType === 'DATA_FILE_IMPORT' || params.taskType === 'SQL_FILE_IMPORT';
+    const preparedImport = isImportRequest
+      ? prepareImportSubmission(params as ImportTaskParams, importSubmissionIdentityRef.current)
+      : undefined;
+    const importParams = preparedImport?.params;
+    if (preparedImport) importSubmissionIdentityRef.current = preparedImport.identity;
+    const hasServerStagedFiles = importParams ? hasServerStagedImportFiles(importParams) : false;
+    const submittedStagedFileIds = importParams ? getServerStagedImportFileIds(importParams) : [];
+    const submissionGeneration = ++submissionGenerationRef.current;
+    if (importParams) {
+      submittedImportTargetsRef.current = (importParams.tableSources || []).map((source) => ({
+        dataSourceId: importParams.dataSourceId,
+        databaseName: source.databaseName || importParams.databaseName,
+        schemaName: source.schemaName,
+        tableName: source.tableName,
+      }));
     } else {
-      response = await importExportServices.submitExport(params);
+      submittedImportTargetsRef.current = [];
     }
-    setTaskId(response.taskId);
-    getTaskList();
+    const request = importParams
+      ? importExportServices.submitImport(importParams)
+      : importExportServices.submitExport(params as ExportTaskParams);
+    request
+      .then((res) => {
+        void getTaskList();
+        if (submissionGeneration !== submissionGenerationRef.current) return;
+        importExportFileRef.current?.markStagedFilesSubmitted(submittedStagedFileIds);
+        setTaskId(res.taskId);
+      })
+      .catch((error) => {
+        if (submissionGeneration !== submissionGenerationRef.current) return;
+        const unknownResponse = isUnknownSubmissionResponse(error);
+        if (isImportRequest) {
+          importSubmissionIdentityRef.current = importSubmissionIdentityAfterFailure(
+            importSubmissionIdentityRef.current,
+            error,
+          );
+        }
+        if (isImportRequest && hasServerStagedFiles && !unknownResponse) {
+          importExportFileRef.current?.invalidateStagedFiles(
+            i18n('workspace.importExport.multiTable.submissionFilesExpired'),
+          );
+          submittedImportTargetsRef.current = [];
+          setIsReady(false);
+        }
+      })
+      .finally(() => {
+        if (submissionGeneration === submissionGenerationRef.current) setSubmitting(false);
+      });
   };
 
-  const handleImportFileChange = (file?: FileUrl) => {
-    setImportFile(file);
+  const closeModal = () => {
+    submissionGenerationRef.current += 1;
+    setSubmitting(false);
+    importSubmissionIdentityRef.current = undefined;
+    if (!taskId) importExportFileRef.current?.releaseStagedFiles();
+    setImportExportDataBoundInfo(null);
   };
 
   const renderFooter = () => {
@@ -81,14 +142,10 @@ export default memo<IProps>((_props) => {
       <ModalFooterButton
         footerRight={
           <>
-            <Button
-              onClick={() => {
-                setImportExportDataBoundInfo(null);
-              }}
-            >
+            <Button disabled={submitting} onClick={closeModal}>
               {i18n('common.button.cancel')}
             </Button>
-            <Button type="primary" disabled={!isReady} onClick={handleRunSQl}>
+            <Button type="primary" disabled={!isReady} loading={submitting} onClick={handleRunSQl}>
               {i18n('common.button.start')}
             </Button>
           </>
@@ -97,33 +154,70 @@ export default memo<IProps>((_props) => {
     );
   };
 
-  const handleOpenFile = () => {
-    if (!taskDetails?.artifactId) return;
+  const handleOpenFile = (artifactId?: string) => {
+    if (!taskDetails) return;
+    const localArtifact = artifactId || taskDetails.artifactId;
     if (isDesktop) {
-      jcefApi.revealInExplorer(taskDetails.artifactId);
+      if (localArtifact) jcefApi.revealInExplorer(localArtifact);
       return;
     }
-    window.open(`/api/tasks/artifact?taskId=${taskDetails.id}`, '_blank');
+    window.open(artifactDownloadUrl({ taskId: taskDetails.id, artifactId }), '_blank');
   };
+
+  const downloadableArtifacts = getDownloadableTaskArtifacts(taskDetails);
+  const artifactMenuItems: MenuProps['items'] = downloadableArtifacts.map((artifact, index) => {
+    const fileName = artifact.artifactId.split(/[\\/]/).pop() || artifact.artifactId;
+    return {
+      key: String(index),
+      icon: isDesktop ? <FolderOpen aria-hidden size={15} /> : <Download aria-hidden size={15} />,
+      label: (
+        <span
+          title={fileName}
+          style={{ display: 'block', maxWidth: 'min(70vw, 420px)', overflow: 'hidden', textOverflow: 'ellipsis' }}
+        >
+          {fileName}
+        </span>
+      ),
+    };
+  });
 
   const logRenderFooter = () => (
     <ModalFooterButton
       footerLeft={
         <>
-          {importExportDataBoundInfo?.type === ImportExportType.EXPORT &&
-            taskDetails?.status === ImportExportTaskStatus.SUCCESS && (
-              <Button icon={<IconfontSvg code="icon-folder" />} onClick={handleOpenFile}>
+          {downloadableArtifacts.length ? (
+            <Dropdown
+              trigger={['click']}
+              overlayStyle={{ maxWidth: 'calc(100vw - 32px)', maxHeight: 'min(60vh, 360px)', overflowY: 'auto' }}
+              menu={{
+                items: artifactMenuItems,
+                onClick: ({ key }) => handleOpenFile(downloadableArtifacts[Number(key)]?.artifactId),
+              }}
+            >
+              <Button
+                type={downloadableArtifacts.some(({ role }) => role === 'OUTPUT') ? 'primary' : 'default'}
+                icon={isDesktop ? <FolderOpen aria-hidden size={15} /> : <Download aria-hidden size={15} />}
+              >
+                {i18n('workspace.importExport.taskArtifacts')} ({downloadableArtifacts.length})
+              </Button>
+            </Dropdown>
+          ) : (
+            shouldShowLegacyPrimaryArtifact(taskDetails) && (
+              <Button
+                type="primary"
+                icon={isDesktop ? <FolderOpen aria-hidden size={15} /> : <Download aria-hidden size={15} />}
+                onClick={() => handleOpenFile()}
+              >
                 {i18n('workspace.text.openFile')}
               </Button>
-            )}
+            )
+          )}
         </>
       }
       footerRight={
         <>
           <Button
-            onClick={() => {
-              setImportExportDataBoundInfo(null);
-            }}
+            onClick={closeModal}
           >
             {i18n('common.button.close')}
           </Button>
@@ -133,75 +227,79 @@ export default memo<IProps>((_props) => {
   );
 
   const handleTaskChange = (_taskDetails: ImportExportTaskDetails) => {
-    const previousTask = previousTaskDetailsRef.current;
+    const previous = previousTaskDetailsRef.current;
     previousTaskDetailsRef.current = _taskDetails;
     setTaskDetails(_taskDetails);
-    if (shouldRefreshImportTargetTable(previousTask, _taskDetails)) {
-      window.dispatchEvent(
-        new CustomEvent(IMPORT_TARGET_TABLE_REFRESH_EVENT, {
-          detail: _taskDetails.target,
-        }),
-      );
+    const becameSuccessful =
+      _taskDetails.status === ImportExportTaskStatus.SUCCESS &&
+      (!previous || previous.id === _taskDetails.id) &&
+      previous?.status !== ImportExportTaskStatus.SUCCESS;
+    if (becameSuccessful && submittedImportTargetsRef.current.length) {
+      submittedImportTargetsRef.current.forEach((target) => {
+        window.dispatchEvent(new CustomEvent(IMPORT_TARGET_TABLE_REFRESH_EVENT, { detail: target }));
+      });
+      void getTaskList();
+      return;
+    }
+    if (shouldRefreshImportTargetTable(previous, _taskDetails)) {
+      window.dispatchEvent(new CustomEvent(IMPORT_TARGET_TABLE_REFRESH_EVENT, { detail: _taskDetails.target }));
       void getTaskList();
     }
   };
 
-  const importPreviewContext =
+  const modalTitle = (() => {
+    if (importExportDataBoundInfo?.type === ImportExportType.IMPORT) {
+      if (
+        importExportDataBoundInfo.targetScope !== 'TABLE' &&
+        importExportDataBoundInfo.fileType !== ImportExportFileType.SQL
+      ) {
+        return i18n('workspace.menu.importMultipleTables');
+      }
+      return importExportDataBoundInfo.targetScope === 'TABLE'
+        ? i18n('workspace.menu.importData')
+        : i18n('workspace.menu.runSqlFile');
+    }
+    if (importExportDataBoundInfo?.sqlExportScope === 'SCHEMA') {
+      return i18n('workspace.menu.exportStructure');
+    }
+    if (importExportDataBoundInfo?.sqlExportScope === 'ALL') {
+      return i18n('workspace.menu.exportStructureData');
+    }
+    return i18n('workspace.menu.exportData');
+  })();
+
+  const isMultiTableImport =
     importExportDataBoundInfo?.type === ImportExportType.IMPORT &&
-    isPreviewFile(importFile) &&
-    importExportDataBoundInfo.dataSourceId != null &&
-    importExportDataBoundInfo.databaseName != null &&
-    importFile != null
-      ? {
-          dataSourceId: importExportDataBoundInfo.dataSourceId,
-          databaseName: importExportDataBoundInfo.databaseName,
-          schemaName: importExportDataBoundInfo.schemaName,
-          tableName: importExportDataBoundInfo.tableName || '',
-          file: importFile,
-        }
-      : null;
-  const showImportPreview = taskId == null && importPreviewContext != null;
+    importExportDataBoundInfo.targetScope !== 'TABLE' &&
+    importExportDataBoundInfo.fileType !== ImportExportFileType.SQL;
 
   return (
     <Modal
       open={!!importExportDataBoundInfo}
       okText={i18n('common.button.start')}
       cancelText={i18n('common.button.cancel')}
-      title={
-        importExportDataBoundInfo?.type === ImportExportType.IMPORT
-          ? i18n('workspace.menu.importData')
-          : i18n('workspace.menu.exportData')
-      }
+      title={modalTitle}
+      width={960}
       headerIconCode={importExportDataBoundInfo?.type === ImportExportType.IMPORT ? 'icon-upload' : 'icon-download'}
-      width={showImportPreview ? 960 : undefined}
-      centered
+      headerBorder
       destroyOnClose
-      footer={taskId ? logRenderFooter() : showImportPreview ? null : renderFooter()}
+      footer={taskId ? logRenderFooter() : renderFooter()}
       maskClosable={false}
+      closable={!submitting}
       onCancel={() => {
-        setImportExportDataBoundInfo(null);
+        if (!submitting) closeModal();
       }}
     >
       {taskId ? (
         <Log onTaskChange={handleTaskChange} taskId={taskId} />
-      ) : importPreviewContext ? (
-        <ImportMappingContent
-          dataSourceId={importPreviewContext.dataSourceId}
-          databaseName={importPreviewContext.databaseName}
-          schemaName={importPreviewContext.schemaName}
-          tableName={importPreviewContext.tableName}
-          file={importPreviewContext.file}
-          onSubmitted={(submittedTaskId) => {
-            setTaskId(submittedTaskId);
-            getTaskList();
-          }}
+      ) : isMultiTableImport && importExportDataBoundInfo ? (
+        <MultiTableImportWizard
+          ref={importExportFileRef}
+          boundInfo={importExportDataBoundInfo}
+          setIsReady={setIsReady}
         />
       ) : (
-        <ImportExportFile
-          ref={importExportFileRef}
-          setIsReady={setIsReady}
-          onImportFileChange={handleImportFileChange}
-        />
+        <ImportExportFile ref={importExportFileRef} setIsReady={setIsReady} />
       )}
     </Modal>
   );

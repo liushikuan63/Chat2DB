@@ -304,4 +304,6 @@ export default {
   'common.text.creator': '作成者',
   'common.text.singleUploadFileSize': 'ファイルサイズは{1}Mを超えてはいけません',
   'common.text.limitFileSize': 'ファイルサイズは{1}Mを超えてはいけません',
+  'common.text.uploadFileCountLimit': '選択できるファイルは最大{1}件です',
+  'common.text.uploadTotalSizeLimit': '選択したファイルの合計サイズは{1}を超えることはできません',
 };
