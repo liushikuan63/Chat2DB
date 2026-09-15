@@ -1730,11 +1730,6 @@ public class DefaultSQLExecutor implements ICommandExecutor {
         return false;
     }
 
-    /**
-     * Statements per JDBC batch executed by {@link #executeBatchInsert}.
-     */
-    public static final int BATCH_INSERT_CHUNK_SIZE = 500;
-
     public void executeBatchInsert(Connection connection, List<String> sqlCacheList) {
         executeBatchInsert(connection, sqlCacheList, null, null);
     }
@@ -1742,93 +1737,21 @@ public class DefaultSQLExecutor implements ICommandExecutor {
     public void executeBatchInsert(Connection connection, List<String> sqlCacheList,
                                    ISqlExecutionStatementListener statementListener,
                                    Runnable cancellationChecker) {
-        if (sqlCacheList == null || sqlCacheList.isEmpty()) {
-            return;
-        }
-        boolean manageTransaction;
         try {
-            manageTransaction = connection.getAutoCommit();
+            for (String sql : sqlCacheList) {
+                checkTaskCancellation(cancellationChecker);
+                PreparedStatement stmt = connection.prepareStatement(sql);
+                try (stmt) {
+                    notifyStatementCreated(statementListener, stmt);
+                    checkTaskCancellation(cancellationChecker);
+                    stmt.executeUpdate();
+                } finally {
+                    notifyStatementClosed(statementListener, stmt);
+                }
+            }
         } catch (SQLException e) {
+            checkTaskCancellation(cancellationChecker);
             throw new RuntimeException(e);
-        }
-
-        boolean transactionStarted = false;
-        boolean chunkOpen = false;
-        boolean discardRequired = false;
-        Exception failure = null;
-        try {
-            if (manageTransaction) {
-                connection.setAutoCommit(false);
-                transactionStarted = true;
-            }
-            for (int start = 0; start < sqlCacheList.size(); start += BATCH_INSERT_CHUNK_SIZE) {
-                chunkOpen = manageTransaction;
-                checkTaskCancellation(cancellationChecker);
-                List<String> chunk = sqlCacheList.subList(start,
-                        Math.min(sqlCacheList.size(), start + BATCH_INSERT_CHUNK_SIZE));
-                executeInsertChunk(connection, chunk, statementListener, cancellationChecker);
-                if (manageTransaction) {
-                    connection.commit();
-                    chunkOpen = false;
-                }
-            }
-        } catch (Exception e) {
-            failure = e;
-        }
-
-        if (failure != null && chunkOpen) {
-            try {
-                connection.rollback();
-            } catch (SQLException rollbackFailure) {
-                failure.addSuppressed(rollbackFailure);
-                discardRequired = true;
-            }
-        }
-
-        if (transactionStarted && !discardRequired) {
-            try {
-                connection.setAutoCommit(true);
-            } catch (SQLException restoreFailure) {
-                if (failure == null) {
-                    failure = restoreFailure;
-                } else {
-                    failure.addSuppressed(restoreFailure);
-                }
-                discardRequired = true;
-            }
-        }
-
-        if (discardRequired) {
-            discardConnection(connection, failure);
-        }
-        if (failure != null) {
-            try {
-                checkTaskCancellation(cancellationChecker);
-            } catch (RuntimeException cancellation) {
-                if (cancellation != failure) {
-                    cancellation.addSuppressed(failure);
-                }
-                throw cancellation;
-            }
-            throw failure instanceof RuntimeException runtime
-                    ? runtime : new RuntimeException(failure);
-        }
-    }
-
-    private void executeInsertChunk(Connection connection, List<String> chunk,
-                                    ISqlExecutionStatementListener statementListener,
-                                    Runnable cancellationChecker) throws SQLException {
-        try (Statement statement = connection.createStatement()) {
-            notifyStatementCreated(statementListener, statement);
-            try {
-                checkTaskCancellation(cancellationChecker);
-                for (String sql : chunk) {
-                    statement.addBatch(sql);
-                }
-                statement.executeBatch();
-            } finally {
-                notifyStatementClosed(statementListener, statement);
-            }
         }
     }
 
@@ -1886,6 +1809,35 @@ public class DefaultSQLExecutor implements ICommandExecutor {
         try (ResultSet resultSet = connection.getMetaData().getPrimaryKeys(databaseName, schemaName, tableName)) {
             return ResultSetUtils.toObjectList(resultSet, PrimaryKey.class);
         } catch (Exception e) {
+            throw new RuntimeException(e);
+        }
+    }
+
+    /** Executes a JDBC batch using the connection's existing transaction settings. */
+    public void executeJdbcBatchInsert(Connection connection, List<String> sqls,
+                                      ISqlExecutionStatementListener statementListener,
+                                      Runnable cancellationChecker) {
+        if (sqls == null || sqls.isEmpty()) {
+            return;
+        }
+        checkTaskCancellation(cancellationChecker);
+        try {
+            Statement statement = connection.createStatement();
+            try {
+                try (statement) {
+                    notifyStatementCreated(statementListener, statement);
+                    checkTaskCancellation(cancellationChecker);
+                    for (String sql : sqls) {
+                        statement.addBatch(sql);
+                    }
+                    statement.executeBatch();
+                    checkTaskCancellation(cancellationChecker);
+                }
+            } finally {
+                notifyStatementClosed(statementListener, statement);
+            }
+        } catch (SQLException e) {
+            checkTaskCancellation(cancellationChecker);
             throw new RuntimeException(e);
         }
     }
