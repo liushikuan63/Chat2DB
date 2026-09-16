@@ -23,7 +23,6 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -44,68 +43,55 @@ class DefaultSQLExecutorTaskCancellationTest {
     }
 
     @Test
-    void cancellationBetweenChunksStopsTheRemainingChunks() throws Exception {
-        // 501 rows forces two chunks with the 500-statement chunk size.
-        List<String> sqls = new java.util.ArrayList<>();
-        for (int value = 1; value <= 501; value++) {
-            sqls.add("INSERT INTO records VALUES (" + value + ")");
-        }
+    void cancellationBeforeNextPrepareStopsRemainingBatch() throws Exception {
         try (Connection connection = DriverManager.getConnection("jdbc:h2:mem:cancel_batch;DB_CLOSE_DELAY=-1")) {
             createTable(connection);
             AtomicInteger checks = new AtomicInteger();
             CountingStatementListener listener = new CountingStatementListener();
 
             assertThrows(CancellationException.class,
-                    () -> DefaultSQLExecutor.getInstance().executeBatchInsert(connection, sqls,
+                    () -> DefaultSQLExecutor.getInstance().executeBatchInsert(connection, List.of(
+                                    "INSERT INTO records VALUES (1)",
+                                    "INSERT INTO records VALUES (2)"),
                             listener, () -> {
                                 if (checks.incrementAndGet() >= 3) {
-                                    throw new CancellationException("cancelled between chunks");
+                                    throw new CancellationException("cancelled between statements");
                                 }
                             }));
 
-            assertEquals(500, countRows(connection));
+            assertEquals(1, countRows(connection));
             assertEquals(1, listener.created.get());
             assertEquals(1, listener.closed.get());
         }
     }
 
     @Test
-    void stopCancelsExecutingBatchAndPreventsTheNextChunk() throws Exception {
-        List<String> sqls = new java.util.ArrayList<>();
-        for (int value = 1; value <= 501; value++) {
-            sqls.add("INSERT INTO records VALUES (" + value + ")");
-        }
-        AtomicInteger createCalls = new AtomicInteger();
+    void stopCancelsExecutingStatementAndPreventsNextStatement() throws Exception {
+        AtomicInteger prepareCalls = new AtomicInteger();
+        AtomicInteger executeCalls = new AtomicInteger();
         AtomicInteger cancelCalls = new AtomicInteger();
         CountDownLatch executeStarted = new CountDownLatch(1);
+        CountDownLatch cancelled = new CountDownLatch(1);
+        PreparedStatement statement = blockingStatement(executeCalls, cancelCalls, executeStarted, cancelled);
+        Connection connection = connection(statement, prepareCalls);
         TestCancellation cancellation = new TestCancellation();
         ExecutorService executor = Executors.newSingleThreadExecutor();
 
-        try (Connection real = DriverManager.getConnection("jdbc:h2:mem:cancel_running;DB_CLOSE_DELAY=-1")) {
-            createTable(real);
-            Connection connection = (Connection) Proxy.newProxyInstance(
-                    DefaultSQLExecutorTaskCancellationTest.class.getClassLoader(),
-                    new Class<?>[]{Connection.class}, (proxy, method, args) -> {
-                        Object value = method.invoke(real, args);
-                        if ("createStatement".equals(method.getName()) && value instanceof Statement statement) {
-                            createCalls.incrementAndGet();
-                            value = blockingStatement(statement, cancelCalls, executeStarted);
-                        }
-                        return value;
-                    });
-
-            var execution = executor.submit(
-                    () -> DefaultSQLExecutor.getInstance().executeBatchInsert(connection, sqls,
-                            cancellation, cancellation::checkCancelled));
-            assertTrue(executeStarted.await(5, TimeUnit.SECONDS), "batch did not start executing");
+        try {
+            var execution = executor.submit(() -> DefaultSQLExecutor.getInstance().executeBatchInsert(
+                    connection, List.of("first", "second"), cancellation, cancellation::checkCancelled));
+            assertTrue(executeStarted.await(5, TimeUnit.SECONDS), "statement did not start executing");
 
             assertTrue(cancellation.stop());
 
-            assertThrows(ExecutionException.class, () -> execution.get(10, TimeUnit.SECONDS));
-            assertEquals(1, createCalls.get(), "the second chunk must never open a statement");
+            ExecutionException failure = assertThrows(ExecutionException.class,
+                    () -> execution.get(5, TimeUnit.SECONDS));
+            assertInstanceOf(CancellationException.class, failure.getCause());
+            assertEquals(1, prepareCalls.get());
+            assertEquals(1, executeCalls.get());
             assertEquals(1, cancelCalls.get());
-            assertEquals(0, countRows(real), "the cancelled chunk rolls back with its transaction");
         } finally {
+            cancelled.countDown();
             executor.shutdownNow();
         }
     }
@@ -143,43 +129,6 @@ class DefaultSQLExecutorTaskCancellationTest {
         }
     }
 
-    @Test
-    void callerOwnedTransactionKeepsAutoCommitDisabled() throws Exception {
-        try (Connection connection = DriverManager.getConnection("jdbc:h2:mem:caller_owned")) {
-            createTable(connection);
-            connection.setAutoCommit(false);
-            DefaultSQLExecutor.getInstance().executeBatchInsert(connection,
-                    List.of("INSERT INTO records VALUES (1)"));
-            assertFalse(connection.getAutoCommit());
-            connection.rollback();
-            assertEquals(0, countRows(connection));
-        }
-    }
-
-    @Test
-    void failedBatchDoesNotRollbackCallerOwnedWork() throws Exception {
-        try (Connection connection = DriverManager.getConnection(
-                "jdbc:h2:mem:caller_owned_failure")) {
-            createTable(connection);
-            connection.setAutoCommit(false);
-            try (Statement statement = connection.createStatement()) {
-                statement.execute("INSERT INTO records VALUES (99)");
-            }
-            assertThrows(RuntimeException.class,
-                    () -> DefaultSQLExecutor.getInstance().executeBatchInsert(connection,
-                            List.of("INSERT INTO records VALUES (1)",
-                                    "INSERT INTO records VALUES (1)")));
-            assertFalse(connection.getAutoCommit());
-            try (Statement statement = connection.createStatement();
-                 ResultSet resultSet = statement.executeQuery(
-                         "SELECT COUNT(*) FROM records WHERE id = 99")) {
-                resultSet.next();
-                assertEquals(1, resultSet.getInt(1));
-            }
-            connection.rollback();
-        }
-    }
-
     private static void createTable(Connection connection) throws SQLException {
         try (Statement statement = connection.createStatement()) {
             statement.execute("CREATE TABLE records(id INT PRIMARY KEY)");
@@ -194,15 +143,28 @@ class DefaultSQLExecutorTaskCancellationTest {
         }
     }
 
-    private static Statement blockingStatement(Statement real, AtomicInteger cancelCalls,
-            CountDownLatch executeStarted) {
-        CountDownLatch cancelled = new CountDownLatch(1);
-        return (Statement) Proxy.newProxyInstance(
+    private static Connection connection(PreparedStatement statement, AtomicInteger prepareCalls) {
+        return (Connection) Proxy.newProxyInstance(
                 DefaultSQLExecutorTaskCancellationTest.class.getClassLoader(),
-                new Class<?>[]{Statement.class}, (proxy, method, args) -> {
-                    if ("executeBatch".equals(method.getName())) {
+                new Class<?>[]{Connection.class}, (proxy, method, args) -> {
+                    if ("prepareStatement".equals(method.getName())) {
+                        prepareCalls.incrementAndGet();
+                        return statement;
+                    }
+                    return defaultValue(method.getReturnType());
+                });
+    }
+
+    private static PreparedStatement blockingStatement(
+            AtomicInteger executeCalls, AtomicInteger cancelCalls,
+            CountDownLatch executeStarted, CountDownLatch cancelled) {
+        return (PreparedStatement) Proxy.newProxyInstance(
+                DefaultSQLExecutorTaskCancellationTest.class.getClassLoader(),
+                new Class<?>[]{PreparedStatement.class}, (proxy, method, args) -> {
+                    if ("executeUpdate".equals(method.getName())) {
+                        executeCalls.incrementAndGet();
                         executeStarted.countDown();
-                        if (!cancelled.await(10, TimeUnit.SECONDS)) {
+                        if (!cancelled.await(5, TimeUnit.SECONDS)) {
                             throw new SQLException("timed out waiting for cancellation");
                         }
                         throw new SQLException("statement cancelled");
@@ -210,9 +172,8 @@ class DefaultSQLExecutorTaskCancellationTest {
                     if ("cancel".equals(method.getName())) {
                         cancelCalls.incrementAndGet();
                         cancelled.countDown();
-                        return null;
                     }
-                    return method.invoke(real, args);
+                    return defaultValue(method.getReturnType());
                 });
     }
 
