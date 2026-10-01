@@ -2,11 +2,13 @@ package ai.chat2db.community.domain.core.impl.task;
 
 import ai.chat2db.community.domain.api.model.PageResponse;
 import ai.chat2db.community.domain.api.model.task.ArtifactDraft;
+import ai.chat2db.community.domain.api.service.task.ArtifactService;
 import ai.chat2db.community.domain.api.model.task.ExportTaskSpec;
 import ai.chat2db.community.domain.api.model.task.ImportTaskSpec;
 import ai.chat2db.community.domain.api.model.task.Task;
 import ai.chat2db.community.domain.api.model.task.TaskErrorCode;
 import ai.chat2db.community.domain.api.model.task.TaskEvent;
+import ai.chat2db.community.domain.api.model.task.TaskExecutionException;
 import ai.chat2db.community.domain.api.model.task.TaskProgress;
 import ai.chat2db.community.domain.api.model.task.TaskQuery;
 import ai.chat2db.community.domain.api.model.task.TaskStatus;
@@ -15,11 +17,13 @@ import ai.chat2db.community.domain.api.model.task.TaskTargetSnapshot;
 import ai.chat2db.community.domain.api.model.task.TaskType;
 import ai.chat2db.community.domain.api.model.task.extension.TaskOperation;
 import ai.chat2db.community.domain.api.model.task.extension.TaskSubmissionContext;
-import ai.chat2db.community.domain.api.service.task.ArtifactService;
 import ai.chat2db.community.domain.api.service.task.TaskExecutionContext;
 import ai.chat2db.community.domain.api.service.task.TaskExecutor;
 import ai.chat2db.community.domain.api.service.task.TaskStorage;
 import ai.chat2db.community.domain.core.converter.ConnectionContextConverter;
+import ai.chat2db.community.domain.core.impl.task.ArtifactServiceImpl;
+import ai.chat2db.community.domain.core.impl.task.ArtifactServiceImpl;
+import ai.chat2db.community.domain.core.impl.task.ArtifactServiceImpl;
 import ai.chat2db.community.domain.core.impl.task.extension.TaskExtensionManager;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
@@ -100,6 +104,43 @@ class TaskExecutorRegistryTest {
     }
 
     @Test
+    void ordinaryFailureCleansTerminalResourcesOnlyAfterFailedStatusIsPersisted() {
+        RecordingTaskStorage storage = new RecordingTaskStorage();
+        Task task = storage.create(Task.builder()
+                        .type(TaskType.QUERY_RESULT_EXPORT.name())
+                        .name("Export result")
+                        .target(target())
+                        .build(),
+                TaskEvent.builder().message("Task created").build());
+        AtomicLong cleanupCalls = new AtomicLong();
+        AtomicReference<String> statusObservedByCleanup = new AtomicReference<>();
+        RunningTask runningTask = new RunningTask(task.getId(), () -> {
+            cleanupCalls.incrementAndGet();
+            statusObservedByCleanup.set(storage.get(task.getId()).orElseThrow().getStatus());
+        });
+        RunningTaskRegistry runningTaskRegistry = new RunningTaskRegistry();
+        runningTaskRegistry.register(runningTask);
+        TaskExecutor<ExportTaskSpec> executor = exportExecutor(TaskType.QUERY_RESULT_EXPORT.name(),
+                (spec, context) -> {
+                    throw new TaskExecutionException(TaskErrorCode.EXPORT_FAILED.name(), "Export failed");
+                });
+        TaskRunner<ExportTaskSpec> runner = new TaskRunner<>(
+                new TaskSubmission<>(task.getId(), exportSpec(), null, null,
+                        new TaskSubmissionContext(task.getId(), TaskType.QUERY_RESULT_EXPORT, null,
+                                null, null, List.of(), TaskOperation.EXPORT).toExecutionContext()),
+                runningTask, runningTaskRegistry, storage, executor, new ArtifactServiceImpl(),
+                emptyExtensionManager());
+
+        runner.run();
+
+        assertEquals(TaskStatus.FAILED.name(), storage.get(task.getId()).orElseThrow().getStatus());
+        assertEquals(1L, cleanupCalls.get());
+        assertEquals(TaskStatus.FAILED.name(), statusObservedByCleanup.get());
+        assertTrue(runningTask.isClosed());
+        assertTrue(runningTaskRegistry.get(task.getId()) == null);
+    }
+
+    @Test
     void artifactPublishFailureDoesNotMarkTaskSuccessful(@TempDir Path tempDirectory) throws IOException {
         RecordingTaskStorage storage = new RecordingTaskStorage();
         Task task = storage.create(Task.builder()
@@ -108,7 +149,7 @@ class TaskExecutorRegistryTest {
                         .target(target())
                         .build(),
                 TaskEvent.builder().message("Task created").build());
-        RunningTask runningTask = new RunningTask(task.getId());
+        RunningTask runningTask = new RunningTask(task.getId(), () -> { });
         RunningTaskRegistry runningTaskRegistry = new RunningTaskRegistry();
         runningTaskRegistry.register(runningTask);
         AtomicReference<ArtifactDraft> draftReference = new AtomicReference<>();
@@ -120,9 +161,8 @@ class TaskExecutorRegistryTest {
                 });
         ArtifactService failingArtifactService = new ArtifactServiceImpl() {
             @Override
-            void copyArtifact(Path source, java.io.OutputStream output) throws IOException {
-                output.write('x');
-                throw new IOException("Publish failed");
+            public String publish(ArtifactDraft ignored) {
+                throw new IllegalStateException("Publish failed");
             }
         };
         TaskRunner<ExportTaskSpec> runner = new TaskRunner<>(
@@ -150,7 +190,7 @@ class TaskExecutorRegistryTest {
                 importExecutor(TaskType.DATA_FILE_IMPORT.name())));
         taskManager = new LocalTaskManager(storage, registry, new ArtifactServiceImpl(),
                 new ConnectionContextConverter(), emptyExtensionManager(), 1, 1);
-        return new TaskServiceImpl(storage, taskManager, new TaskDeletionServiceImpl(storage, new ArtifactServiceImpl()));
+        return new TaskServiceImpl(storage, taskManager, new ArtifactServiceImpl());
     }
 
     private TaskExtensionManager emptyExtensionManager() {
@@ -212,6 +252,8 @@ class TaskExecutorRegistryTest {
         private final AtomicLong ids = new AtomicLong();
         private final Map<Long, Task> tasks = new LinkedHashMap<>();
         private final Map<Long, List<TaskEvent>> events = new LinkedHashMap<>();
+        private final Map<Long, List<ai.chat2db.community.domain.api.model.task.TaskArtifact>> artifacts =
+                new LinkedHashMap<>();
         private final List<String> statusTransitions = new ArrayList<>();
         private int createCount;
 
@@ -314,8 +356,56 @@ class TaskExecutorRegistryTest {
             }
             tasks.remove(taskId);
             events.remove(taskId);
+            artifacts.remove(taskId);
             commitAction.run();
             return true;
+        }
+
+        @Override
+        public synchronized List<ai.chat2db.community.domain.api.model.task.TaskArtifact> listArtifacts(Long taskId) {
+            return new ArrayList<>(artifacts.getOrDefault(taskId, List.of()));
+        }
+
+        @Override
+        public synchronized void saveArtifact(Long taskId,
+                ai.chat2db.community.domain.api.model.task.TaskArtifact artifact) {
+            if (!tasks.containsKey(taskId)) {
+                throw new IllegalArgumentException("artifact must reference an existing task");
+            }
+            List<ai.chat2db.community.domain.api.model.task.TaskArtifact> stored =
+                    artifacts.computeIfAbsent(taskId, ignored -> new ArrayList<>());
+            stored.removeIf(existing -> existing.getArtifactId().equals(artifact.getArtifactId()));
+            stored.add(artifact);
+        }
+
+        @Override
+        public synchronized void deleteArtifact(Long taskId, String artifactId) {
+            List<ai.chat2db.community.domain.api.model.task.TaskArtifact> stored = artifacts.get(taskId);
+            if (stored != null) {
+                stored.removeIf(existing -> existing.getArtifactId().equals(artifactId));
+            }
+        }
+
+        @Override
+        public synchronized List<Task> listResumableTasks() {
+            return List.of();
+        }
+
+        @Override
+        public synchronized void saveResumeState(Long taskId,
+                ai.chat2db.community.domain.api.model.task.ResumeState state) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public synchronized List<ai.chat2db.community.domain.api.model.task.ResumeState> listResumeStates(
+                Long taskId) {
+            return List.of();
+        }
+
+        @Override
+        public synchronized void clearResumeStates(Long taskId) {
+            throw new UnsupportedOperationException();
         }
 
         synchronized int createCount() {
