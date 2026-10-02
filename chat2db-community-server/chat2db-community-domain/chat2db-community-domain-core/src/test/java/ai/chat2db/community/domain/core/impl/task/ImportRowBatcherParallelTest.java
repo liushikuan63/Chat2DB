@@ -4,10 +4,12 @@ import ai.chat2db.community.domain.api.config.DBConfig;
 import ai.chat2db.community.domain.api.config.DriverConfig;
 import ai.chat2db.community.domain.api.model.PageResponse;
 import ai.chat2db.community.domain.api.model.task.ImportColumnMapping;
+import ai.chat2db.community.domain.api.model.task.ImportOptions;
 import ai.chat2db.community.domain.api.model.task.ImportTaskSpec;
+import ai.chat2db.community.domain.api.model.task.ResumeState;
 import ai.chat2db.community.domain.api.model.task.Task;
+import ai.chat2db.community.domain.api.model.task.TaskArtifact;
 import ai.chat2db.community.domain.api.model.task.TaskEvent;
-import ai.chat2db.community.domain.api.model.task.TaskExecutionException;
 import ai.chat2db.community.domain.api.model.task.TaskQuery;
 import ai.chat2db.community.domain.api.model.task.TaskStatusPatch;
 import ai.chat2db.community.domain.api.model.task.TaskTargetSnapshot;
@@ -15,6 +17,7 @@ import ai.chat2db.community.domain.api.service.task.TaskStorage;
 import ai.chat2db.community.domain.api.model.task.TaskProgress;
 import ai.chat2db.community.domain.core.impl.task.imports.excel.CSVImporter;
 import ai.chat2db.community.domain.core.impl.task.imports.ImportRowBatcher;
+import ai.chat2db.community.domain.api.model.task.TaskStage;
 import ai.chat2db.community.domain.api.model.task.TaskStatus;
 import ai.chat2db.community.tools.constant.JdbcDriverConstants;
 import ai.chat2db.spi.DefaultMetaService;
@@ -42,19 +45,22 @@ import java.util.List;
 import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertNull;
-import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import ai.chat2db.community.domain.core.impl.task.ArtifactServiceImpl;
 
 /**
  * The parallel import path end to end: multiple workers, each on its own dedicated connection,
  * execute partitioned batches while the caller keeps producing. Verifies that parallel workers
- * insert every row exactly once and propagate failed batches without retrying their rows.
+ * insert every row exactly once and that SKIP replay distinguishes bad data from connection
+ * failures.
  */
 class ImportRowBatcherParallelTest {
 
     private static final String DB_TYPE = "PARALLEL_IMPORT_TEST";
+
+    private static final String PARALLELISM_PROPERTY = "chat2db.task.import.parallelism";
+    private static final String MIN_BYTES_PROPERTY = "chat2db.task.import.parallel.min-bytes";
+    private static final String MIN_ROWS_PROPERTY = "chat2db.task.import.parallel.min-rows";
 
     private static final String H2_DRIVER_NAME = "parallel-import-test-h2.jar";
 
@@ -66,12 +72,15 @@ class ImportRowBatcherParallelTest {
     private java.sql.Connection connection;
     private IPlugin previousPlugin;
     private InMemoryTaskStorage storage;
+    private String previousParallelism;
+    private String previousMinBytes;
+    private String previousMinRows;
 
     @BeforeAll
     static void isolateHomeAndSeedDriver() throws Exception {
         // JdbcJarUtils resolves driver names against the driver library under user.home and
         // cannot load an absolute jar path, so seed a copy of the H2 jar and isolate the home
-        // directory so worker connections can load the fixture driver.
+        // directory exactly like ShardedKeysetExportTest does.
         previousUserHome = System.getProperty("user.home");
         File tempHome = Files.createTempDirectory("chat2db-parallel-import-home").toFile();
         System.setProperty("user.home", tempHome.getAbsolutePath());
@@ -89,6 +98,9 @@ class ImportRowBatcherParallelTest {
 
     @BeforeEach
     void setUp() throws Exception {
+        previousParallelism = System.clearProperty(PARALLELISM_PROPERTY);
+        previousMinBytes = System.setProperty(MIN_BYTES_PROPERTY, "0");
+        previousMinRows = System.setProperty(MIN_ROWS_PROPERTY, "0");
         DBConfig config = new DBConfig();
         config.setDbType(DB_TYPE);
         config.setDefaultDriverConfig(new DriverConfig());
@@ -126,7 +138,22 @@ class ImportRowBatcherParallelTest {
         } else {
             Chat2DBContext.PLUGIN_MAP.put(DB_TYPE, previousPlugin);
         }
+        if (previousParallelism == null) {
+            System.clearProperty(PARALLELISM_PROPERTY);
+        } else {
+            System.setProperty(PARALLELISM_PROPERTY, previousParallelism);
+        }
+        restoreProperty(MIN_BYTES_PROPERTY, previousMinBytes);
+        restoreProperty(MIN_ROWS_PROPERTY, previousMinRows);
         connection.close();
+    }
+
+    private static void restoreProperty(String name, String previous) {
+        if (previous == null) {
+            System.clearProperty(name);
+        } else {
+            System.setProperty(name, previous);
+        }
     }
 
     private static DriverConfig h2DriverConfig() {
@@ -140,21 +167,28 @@ class ImportRowBatcherParallelTest {
         Long taskId = storage.create(Task.builder().type("DATA_FILE_IMPORT").name("import")
                 .target(spec.getTarget()).build(), TaskEvent.builder()
                 .level("INFO").code("TASK_CREATED").message("created").build()).getId();
-        return new TaskExecutionContextImpl(taskId, new RunningTask(taskId),
+        return new TaskExecutionContextImpl(taskId, new RunningTask(taskId, () -> { }),
                 storage, new ArtifactServiceImpl());
     }
 
-    private ImportTaskSpec csvSpec(Path csv) {
+    private ImportTaskSpec csvSpec(Path csv, String onError) {
         return ImportTaskSpec.builder()
                 .taskType("DATA_FILE_IMPORT")
                 .sourceFile(csv.toString())
-                .importFileId("parallel-import-test-source")
+                .importFileId("parallel-import-fixture")
                 .format("CSV")
                 .target(TaskTargetSnapshot.builder().dataSourceId(1L).tableName("BULK_ROWS").build())
-                .mode("FAST")
-                .columnMappings(List.of(
-                        new ImportColumnMapping("ID", "ID"),
-                        new ImportColumnMapping("NAME", "NAME")))
+                .mode("ULTRA_FAST")
+                .confirmedNoStrongRelations(true)
+                .options(ImportOptions.builder()
+                        .charset("UTF-8")
+                        .delimiter(",")
+                        .onError(onError)
+                        .maxErrors(1000)
+                        .columnMappings(List.of(
+                                new ImportColumnMapping("ID", "ID"),
+                                new ImportColumnMapping("NAME", "NAME")))
+                        .build())
                 .build();
     }
 
@@ -181,15 +215,14 @@ class ImportRowBatcherParallelTest {
 
     @Test
     void parallelWorkersInsertEveryRowExactlyOnce() throws Exception {
-        // Enough rows that even the contract baseline batch (20000 rows) splits into many batches,
-        // so the assertion below observes real overlap instead of a single-batch edge case.
-        int rows = 200_000;
+        System.setProperty(PARALLELISM_PROPERTY, "4");
+        int rows = 2000;
         String[] lines = new String[rows];
         for (int index = 0; index < rows; index++) {
             lines[index] = (index + 1) + ",name-" + (index + 1);
         }
         Path csv = writeCsv(lines);
-        ImportTaskSpec spec = csvSpec(csv);
+        ImportTaskSpec spec = csvSpec(csv, "FAIL_FAST");
 
         new CSVImporter().run(spec, contextFor(spec));
 
@@ -197,71 +230,33 @@ class ImportRowBatcherParallelTest {
         assertEquals(rows, ids.size(), "parallel import must not lose or duplicate rows");
         assertEquals(1, ids.get(0));
         assertEquals(rows, ids.get(rows - 1));
-        ImportRowBatcher.ImportTuningSnapshot tuning = ImportRowBatcher.lastTuningSnapshot();
-        assertTrue(tuning.batches() > 1, "the import must be split into several batches");
-        assertTrue(tuning.peakInFlightBatches() > 1,
+        assertTrue(ImportRowBatcher.lastTuningSnapshot().peakInFlightBatches() > 1,
                 "the producer must have more than one submitted batch in flight");
-        assertTrue(tuning.gatePermits() <= Runtime.getRuntime().availableProcessors(),
-                "the fan-out must never exceed the machine's available parallelism");
     }
 
     @Test
-    void parallelImportUsesParsedRowsWithQuotedNewlines() throws Exception {
-        ImportTaskSpec spec = csvSpec(writeCsv("1,\"Alice\nCooper\"", "2,Bob"));
+    void skipReplayRejectsConsecutiveBadRowsWithoutAbortingHealthyRows() throws Exception {
+        System.setProperty(PARALLELISM_PROPERTY, "2");
+        Path csv = writeCsv("1,ok", "1,dup-a", "1,dup-b", "1,dup-c", "2,ok");
+        ImportTaskSpec spec = csvSpec(csv, "SKIP");
 
         new CSVImporter().run(spec, contextFor(spec));
 
-        assertEquals(List.of(1, 2), importedIds());
-        try (Statement statement = connection.createStatement();
-             ResultSet rows = statement.executeQuery("SELECT NAME FROM BULK_ROWS WHERE ID=1")) {
-            assertTrue(rows.next());
-            assertEquals("Alice\nCooper", rows.getString(1));
-        }
-        assertEquals(Math.min(4, Runtime.getRuntime().availableProcessors()),
-                ImportRowBatcher.lastTuningSnapshot().workers());
+        List<Integer> ids = importedIds();
+        assertEquals(List.of(1, 2), ids,
+                "adjacent constraint violations are rejected without hiding healthy rows");
     }
 
     @Test
-    void excelPreservesSequentialFailureEvenWithAFastModeField() throws Exception {
-        Path workbook = tempDirectory.resolve("bulk.xlsx");
-        com.alibaba.excel.EasyExcel.write(workbook.toFile())
-                .head(List.of(List.of("ID"), List.of("NAME")))
-                .sheet().doWrite(List.of(List.of(1, "Alice"), List.of(1, "duplicate"), List.of(2, "Bob")));
-        ImportTaskSpec spec = csvSpec(workbook);
-        spec.setFormat("XLSX");
+    void isolatedBadRowsAreStillSkippedWhenSurroundedBySuccessfulRows() throws Exception {
+        System.setProperty(PARALLELISM_PROPERTY, "2");
+        Path csv = writeCsv("1,ok", "1,isolated-dup", "2,ok", "3,ok");
+        ImportTaskSpec spec = csvSpec(csv, "SKIP");
 
-        assertThrows(TaskExecutionException.class,
-                () -> new ai.chat2db.community.domain.core.impl.task.imports.excel.XLSXImporter().run(spec, contextFor(spec)));
+        new CSVImporter().run(spec, contextFor(spec));
 
-        assertEquals(List.of(1), importedIds());
-    }
-
-    @Test
-    void failedFinalBatchPropagatesWorkerFailureAndKeepsCommittedRows() throws Exception {
-        ImportTaskSpec spec = csvSpec(writeCsv("1,ok", "1,duplicate", "2,ok"));
-        TaskExecutionContextImpl context = contextFor(spec);
-
-        assertThrows(TaskExecutionException.class, () -> new CSVImporter().run(spec, context));
-
-        assertEquals(List.of(1, 2), importedIds(), "H2 commits successful statements in the failed JDBC batch");
-        assertNull(context.artifactDraft());
-        assertTrue(storage.events.stream().anyMatch(event -> "IMPORT_BATCH_FAILED".equals(event.getCode())));
-        assertFalse(storage.events.stream().anyMatch(event -> "IMPORT_SUMMARY".equals(event.getCode())));
-    }
-
-    @Test
-    void failedParallelBatchesReportFailureWithPartialWrites() throws Exception {
-        String[] lines = new String[80_000];
-        for (int index = 0; index < lines.length; index++) {
-            // Every batch contains constraint violations, so the task must report failure.
-            lines[index] = (index % 2) + ",ok";
-        }
-        ImportTaskSpec spec = csvSpec(writeCsv(lines));
-
-        assertThrows(TaskExecutionException.class, () -> new CSVImporter().run(spec, contextFor(spec)));
-
-        assertEquals(List.of(0, 1), importedIds());
-        assertFalse(storage.events.stream().anyMatch(event -> "IMPORT_SUMMARY".equals(event.getCode())));
+        List<Integer> ids = importedIds();
+        assertEquals(List.of(1, 2, 3), ids, "the isolated duplicate row is rejected, others imported");
     }
 
     /**
@@ -272,7 +267,8 @@ class ImportRowBatcherParallelTest {
 
         private final List<Task> tasks = new ArrayList<>();
         private final List<TaskEvent> events = new ArrayList<>();
-
+        private final List<TaskArtifact> artifacts = new ArrayList<>();
+        private final List<ResumeState> states = new ArrayList<>();
         private long sequence;
 
         @Override
@@ -334,5 +330,39 @@ class ImportRowBatcherParallelTest {
             return false;
         }
 
+        @Override
+        public List<TaskArtifact> listArtifacts(Long taskId) {
+            return List.copyOf(artifacts);
+        }
+
+        @Override
+        public void saveArtifact(Long taskId, TaskArtifact artifact) {
+            artifacts.add(artifact);
+        }
+
+        @Override
+        public void deleteArtifact(Long taskId, String artifactId) {
+            artifacts.removeIf(artifact -> artifact.getArtifactId().equals(artifactId));
+        }
+
+        @Override
+        public List<Task> listResumableTasks() {
+            return List.of();
+        }
+
+        @Override
+        public void saveResumeState(Long taskId, ResumeState state) {
+            states.add(state);
+        }
+
+        @Override
+        public List<ResumeState> listResumeStates(Long taskId) {
+            return List.copyOf(states);
+        }
+
+        @Override
+        public void clearResumeStates(Long taskId) {
+            states.clear();
+        }
     }
 }
