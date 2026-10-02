@@ -1,7 +1,22 @@
 import createRequest from './base';
 import { IDatabaseBaseInfo } from '@/typings/database';
 import { IPageResponse } from '@/typings';
-import type { IExcelOptions, IJsonOptions, ISqlImportOptions, ICsvOptions, ImportExportTaskDetails, ImportExportTaskEvent } from '@/typings/importExport';
+import {
+  ImportExportTaskDetails,
+  ImportExportTaskEvent,
+  ITaskArtifact,
+  IImportOptions,
+  IImportPreview,
+  IImportFinalizationOptions,
+  IImportRollbackOptions,
+  IImportStagingPolicy,
+  IImportTableDependency,
+  IImportTableSource,
+  IImportValidationOptions,
+  ImportCycleStrategy,
+  ImportSourceKind,
+  ImportTaskScope,
+} from '@/typings/importExport';
 import { ImportExportFileType, ImportExportTaskType } from '@/constants/importExport';
 
 export interface GenerateJavaClassParams extends IDatabaseBaseInfo {
@@ -32,6 +47,11 @@ export interface TaskIdParams {
   taskId: number;
 }
 
+export interface TaskArtifactParams {
+  taskId: number;
+  artifactId?: string;
+}
+
 export type ExportTaskType =
   | ImportExportTaskType.QUERY_RESULT_EXPORT
   | ImportExportTaskType.SQL_EXPORT
@@ -53,9 +73,14 @@ export interface ExportTaskParams extends IDatabaseBaseInfo {
   containsHeader?: boolean;
   exportPath?: string;
   suggestedFileName?: string;
+  compression?: string;
+  checkpointRows?: number;
+  /** Execution mode: ULTRA_FAST (parallel) or STANDARD (serial). Default STANDARD. */
+  mode?: 'ULTRA_FAST' | 'STANDARD';
 }
 
 export interface ImportTaskParams extends IDatabaseBaseInfo {
+  clientSubmissionId?: string;
   taskType: ImportTaskType;
   taskName?: string;
   tableName?: string;
@@ -64,11 +89,21 @@ export interface ImportTaskParams extends IDatabaseBaseInfo {
   displayFileName?: string;
   format: ImportExportFileType;
   dataTimeFormat?: string;
-  csvOptions?: ICsvOptions;
-  excelOptions?: IExcelOptions;
-  jsonOptions?: IJsonOptions;
-  sqlImportOptions?: ISqlImportOptions;
-  mode?: 'FAST' | 'STANDARD';
+  options?: IImportOptions;
+  unmappedTarget?: 'DEFAULT' | 'NULL';
+  /** Execution mode: ULTRA_FAST (parallel) or STANDARD (serial). Default STANDARD. */
+  mode?: 'ULTRA_FAST' | 'STANDARD';
+  confirmedNoStrongRelations?: boolean;
+  scope?: ImportTaskScope;
+  tableSources?: IImportTableSource[];
+  logicalDependencies?: IImportTableDependency[];
+  sourceKind?: ImportSourceKind;
+  cycleStrategy?: ImportCycleStrategy;
+  stagingPolicy?: IImportStagingPolicy;
+  validationOptions?: IImportValidationOptions;
+  finalizationOptions?: IImportFinalizationOptions;
+  rollbackOptions?: IImportRollbackOptions;
+  performanceSamplePercent?: number;
 }
 
 const submitExport = createRequest<ExportTaskParams, TaskSubmissionResponse>('/api/tasks/export', { method: 'post' });
@@ -97,6 +132,21 @@ const abortUserExit = createRequest<void, void>('/api/tasks/abort-user-exit', {
   method: 'post',
   errorLevel: false,
 });
+const resumeTask = createRequest<TaskIdParams, TaskSubmissionResponse>('/api/tasks/resume', {
+  method: 'post',
+  errorLevel: 'toast',
+});
+const getTaskArtifacts = createRequest<TaskIdParams, ITaskArtifact[]>('/api/tasks/artifacts', {
+  method: 'get',
+  errorLevel: false,
+});
+const previewImport = createRequest<ImportTaskParams, IImportPreview>('/api/tasks/import/preview', {
+  method: 'post',
+  errorLevel: 'toast',
+});
+
+export const artifactDownloadUrl = (params: TaskArtifactParams) =>
+  `/api/tasks/artifact?taskId=${params.taskId}${params.artifactId ? `&artifactId=${encodeURIComponent(params.artifactId)}` : ''}`;
 
 // Generate Java classes
 const generateJavaClass = createRequest<GenerateJavaClassParams, number>('/api/rdb/table/generate/class', {
@@ -113,5 +163,8 @@ export default {
   getActiveTaskCount,
   prepareUserExit,
   abortUserExit,
+  resumeTask,
+  getTaskArtifacts,
+  previewImport,
   generateJavaClass,
 };
