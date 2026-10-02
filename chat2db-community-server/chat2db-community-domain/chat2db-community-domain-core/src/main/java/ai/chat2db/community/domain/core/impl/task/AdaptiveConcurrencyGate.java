@@ -11,16 +11,17 @@ import lombok.extern.slf4j.Slf4j;
  * work; the permit count starts low and is tuned by a throughput observer in an AIMD style: every
  * time {@link #WINDOW_ROWS} rows of data have flowed through since the last evaluation, the gate
  * compares the throughput of the finished window with the previous one and grows by one permit on
- * improvement above 10%, or gives back a quarter of the permits on regression above 10%. The fan-out therefore
+ * improvement, or gives back a quarter of the permits on regression. The fan-out therefore
  * converges to the level the target system actually tolerates instead of a fixed guess, and it
  * backs off on its own when the source or the target becomes the bottleneck.
  *
  * <p>Tuning never throws into the task: every adjustment runs under its own guard, so an observer
- * failure degrades to keeping the current fan-out instead of failing the import. The
+ * failure degrades to keeping the current fan-out instead of failing the export or import. The
  * total permit count is tracked explicitly and hard-capped at {@code maxPermits}, even while
  * workers hold permits, so the fan-out can never exceed its configured ceiling, and tuning never
- * shrinks it past {@link #MIN_PERMITS}. Waiting workers keep checking task cancellation and
- * never execute without a permit.
+ * shrinks it past {@link #MIN_PERMITS}. A stuck gate must not hang a task either: workers wait
+ * through {@link #admit(long)} with a timeout and proceed ungated on expiry, which degrades to the
+ * pre-adaptive unbounded concurrency instead of stalling.
  */
 @Slf4j
 public final class AdaptiveConcurrencyGate extends Semaphore {
@@ -33,10 +34,21 @@ public final class AdaptiveConcurrencyGate extends Semaphore {
 
     /**
      * Hard floor of the fan-out; a gate created below it can still grow, but tuning never shrinks
-     * it past this bound (bounded by the configured max when that is smaller). One permit is the
-     * contract floor of the fast mode, so the fan-out never reaches zero.
+     * it past this bound (bounded by the configured max when that is smaller).
      */
-    static final int MIN_PERMITS = 1;
+    static final int MIN_PERMITS = 2;
+
+    /** Minimum spacing between source-pressure cuts so one slow page cannot crash the fan-out. */
+    private static final long PRESSURE_CUT_SPACING_NANOS = 1_000_000_000L;
+
+    /**
+     * Hysteresis band around the previous window's throughput. Without it, measurement noise on
+     * either side of the baseline is read as a real change and the fan-out oscillates between two
+     * levels, which costs more than the tuning ever gains.
+     */
+    private static final double GROW_MARGIN = 1.10D;
+
+    private static final double SHRINK_MARGIN = 0.90D;
 
     private final int maxPermits;
 
@@ -45,13 +57,16 @@ public final class AdaptiveConcurrencyGate extends Semaphore {
     /** Total permits in circulation; only the tuning paths change it, and never past maxPermits. */
     private final AtomicInteger totalPermits;
 
-    private static final double GROW_MARGIN = 1.10D;
-
-    private static final double SHRINK_MARGIN = 0.90D;
-
+    /**
+     * Accumulated under {@code this}. Rows and nanoseconds are added, evaluated and reset as one
+     * pair: two independent atomic counters can be torn between them, and a window that pairs
+     * one caller's rows with another caller's nanoseconds measures a throughput nobody achieved.
+     */
     private long windowRows;
 
     private long windowNanos;
+
+    private volatile long lastPressureCutNanos;
 
     private double lastThroughput = -1.0D;
 
@@ -79,16 +94,68 @@ public final class AdaptiveConcurrencyGate extends Semaphore {
         if (windowRows < WINDOW_ROWS) {
             return;
         }
-        tuneThroughput(windowRows, windowNanos);
+        long consumedRows = windowRows;
+        long consumedNanos = windowNanos;
         windowRows = 0L;
         windowNanos = 0L;
+        tuneThroughput(consumedRows, consumedNanos);
     }
 
-    /** Waits for a permit while checking cancellation between bounded waits. */
-    public void awaitPermit(Runnable cancellationChecker) throws InterruptedException {
-        cancellationChecker.run();
-        while (!tryAcquire(200L, TimeUnit.MILLISECONDS)) {
-            cancellationChecker.run();
+    /**
+     * Source-pressure response for readers: a page query took noticeably longer than healthy, so
+     * give back a quarter of the fan-out immediately instead of waiting for the throughput window
+     * to notice, letting the source database recover. Cooldown-limited and failure-tolerant; the
+     * regular AIMD window tuning remains the recovery path once the source speeds up again.
+     */
+    public void reduceForSourcePressure() {
+        long now = System.nanoTime();
+        synchronized (this) {
+            if (now - lastPressureCutNanos < PRESSURE_CUT_SPACING_NANOS
+                    || totalPermits.get() <= floor) {
+                return;
+            }
+            lastPressureCutNanos = now;
+            try {
+                int cut = Math.max(1, totalPermits.get() / 4);
+                int target = Math.max(floor, totalPermits.get() - cut);
+                while (totalPermits.get() > target) {
+                    reducePermits(1);
+                    totalPermits.decrementAndGet();
+                }
+            } catch (Throwable tuningFailure) {
+                log.warn("Source-pressure permit reduction failed; keeping the current fan-out",
+                        tuningFailure);
+            }
+        }
+    }
+
+    /**
+     * Bounded permit wait for task workers: waits up to {@code timeoutMillis} and then reports
+     * failure instead of blocking forever, so a stuck gate degrades to ungated execution (the
+     * pre-adaptive behaviour) rather than hanging the task.
+     *
+     * @return whether a permit was taken and must later be returned via {@link #relinquish}
+     */
+    public boolean admit(long timeoutMillis) {
+        try {
+            return tryAcquire(timeoutMillis, TimeUnit.MILLISECONDS);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return false;
+        }
+    }
+
+    /** Returns a permit taken by {@link #admit}; never throws into the worker. */
+    public void relinquish(boolean permitted) {
+        if (!permitted) {
+            return;
+        }
+        try {
+            release();
+        } catch (Throwable releaseFailure) {
+            // The lost permit is capacity, not data: the AIMD tuning re-grows it.
+            log.warn("Returning a gate permit failed; the AIMD tuning will restore the capacity",
+                    releaseFailure);
         }
     }
 
@@ -121,15 +188,16 @@ public final class AdaptiveConcurrencyGate extends Semaphore {
         }
     }
 
-    int currentPermits() {
-        return availablePermits();
-    }
-
     /**
-     * Permits currently in circulation; callers that own growable worker capacity compare it with
-     * the number of live workers to decide whether more workers are needed.
+     * Permits currently in circulation, including the ones workers are holding. Callers that own
+     * growable worker capacity compare it with the number of live workers to decide whether more
+     * workers are needed; it never exceeds the ceiling passed to {@link #create}.
      */
     public int totalPermits() {
         return totalPermits.get();
+    }
+
+    int currentPermits() {
+        return availablePermits();
     }
 }
