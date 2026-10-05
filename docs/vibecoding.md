@@ -284,10 +284,14 @@ mvn -B -o -f chat2db-community-server/pom.xml -pl '<module>' -am \
 - VB-011 已覆盖“失败 → 回滚 → 重试不丢行”的完整链路，但用的是单节点导入路径 + 延迟持久化上下文；**没有**从 `ImportManifestScheduler` 驱动真实分片重试（调度器自身的重试用例在 `ImportManifestSchedulerTest.retriesADeadlockedShardBeforePersistingDone`）。
 - VB-005 的清理路径由既有参数化用例覆盖（`ARTIFACT_PUBLICATION_STARTED` 与 `ARTIFACT_PUBLISHED` 两个分支都会删除孤儿产物），但**没有**做“move 与落库之间 kill 进程”的真实故障注入。
 - VB-003 只在当前文件系统验证；Windows / macOS 上的原子占位行为未实测。
-- **前端浏览器实跑：部分完成**。已用真实 Chrome（Playwright）跑起来：后端 `chat2db-community.jar`（127.0.0.1:10825）+ 前端 dev server（127.0.0.1:8889），页面正常渲染，并通过真实 UI 走通“新建 H2 数据源”全流程（截图 `01-landing.png` / `06-h2-form.png` / `08-h2-test.png` / `09-connection-saved.png`）。
-  - 双重取证：同一轮里 `POST /api/connection/datasource/create` 返回 `200 application/json`，而故意编造的 `/api/definitely-not-a-real-endpoint-xyz` 返回 `200 text/html`（SPA fallback）——两者不同形，证明 200 不等于接口存在。
-  - **未验证**：任务中心面板的恢复按钮**没有截图**。该入口（`WorkspaceRecordSwitcher` 的 `任务中心` tab）在本运行环境里始终没有渲染出来，试过：坐标点击扩展导航三处、DOM 查 `[title]`/`role=tablist`、hover 读 tooltip、直接种入 zustand 持久化、以及拦截 `/api/tasks/list` 注入 `PENDING+RESUMING` 任务，均未打开该面板。因此 VB-012 的“浏览器可见恢复按钮”这一条只有源码 + `taskCenterUtils.test.ts` 的支撑，**不算视觉验收**。
-  - 顺带确认：`canImportExport = isDesktopEnv || isLocalStorageEnv || isDevelopment`，而 `.umirc.ts` 把 `__RUNTIME_ENV__` 固定为 `'community'`，理论上应为 true；实际未渲染出该 tab，需要单独排查（本文件只记录现象）。
+- **前端浏览器实跑：已完成**。真实 Chrome（Playwright）驱动后端 `chat2db-community.jar`（127.0.0.1:10825）+ 前端 dev server（127.0.0.1:8889）：
+  - 页面正常渲染并走通真实 UI 的“新建 H2 数据源”全流程（截图 `01-landing.png`、`06-h2-form.png`、`08-h2-test.png`、`09-connection-saved.png`）。
+  - 双重取证：同一轮 `POST /api/connection/datasource/create` 为 `200 application/json`，而故意编造的 `/api/definitely-not-a-real-endpoint-xyz` 为 `200 text/html`（SPA fallback）——两者不同形，证明 200 不代表接口存在。
+  - **VB-012 恢复按钮已在浏览器中验证**：打开任务中心需要先点标题栏 `TaskCenterStatusBadge` 内层节点、再点记录切换器第 2 个 tab（按 `workspaceRecordConfig` 顺序 `[执行记录, 任务中心, 已保存控制台]`）。拦截 `/api/tasks/list` 注入两条任务后：
+    - `PENDING + RESUMING` 行：`isResumable=true`，行尾渲染出 `lucide-rotate-cw` 按钮（内联 `height:18px;width:18px;border-radius:3px`，即 `workspace.task.action.resume`）；
+    - 对照组 `RUNNING + IMPORTING` 行：`isResumable=false`，无该按钮。
+  - 过程中的两个坑记录在此：① 早先按 `title`/类名审计都是假阴性——`IconButton` 的 `title` 走 Tooltip 不落 DOM，且 `style.ts` 里 `taskActions: cx(...)` 生成的类名不含键名；判断渲染必须看结构（`svg.lucide-rotate-cw`）。② dev server 曾被我误判为"陈旧 bundle"，重启后现象不变，说明当时结论错误的原因是审计方法而非缓存。
+  - 后端契约核对：`TaskStage.RESUMING`（`TaskStage.java`）与客户端的 `'RESUMING'` 一致，`LocalTaskManager` 在被中断且带 resume 状态的任务上写该 stage。
 - 桌面安装包未构建，桌面交互改动未做视觉验证。
 - HB-01~HB-09 属于历史分支，当前代码树中不存在，未做任何修改。
 
