@@ -42,6 +42,40 @@ class ArtifactServiceTest {
     Path tempDirectory;
 
     @Test
+    void publishingNeverOverwritesAFileCreatedAfterTheDraftWasReserved() throws IOException {
+        ArtifactService service = new ArtifactServiceImpl();
+        var draft = service.createDraft(7L, TaskArtifactRole.OUTPUT, tempDirectory.toString(), "export.csv",
+                "text/csv");
+        Files.writeString(draft.getTemporaryFile().toPath(), "generated rows");
+
+        // Somebody else takes the reserved name after the draft was created.
+        Path squatter = draft.getTargetFile().toPath();
+        Files.writeString(squatter, "pre-existing user file");
+
+        String artifactId = service.publish(draft);
+
+        assertEquals("pre-existing user file", Files.readString(squatter),
+                "an export must never overwrite a file it did not create");
+        assertNotEquals(squatter.toAbsolutePath().toString(), artifactId,
+                "the export must land under a different name");
+        assertEquals("generated rows", Files.readString(Path.of(artifactId)));
+    }
+
+    @Test
+    void publishingToAFreeNameKeepsTheRequestedName() throws IOException {
+        ArtifactService service = new ArtifactServiceImpl();
+        var draft = service.createDraft(8L, TaskArtifactRole.OUTPUT, tempDirectory.toString(), "export.csv",
+                "text/csv");
+        Files.writeString(draft.getTemporaryFile().toPath(), "rows");
+
+        String artifactId = service.publish(draft);
+
+        assertEquals(draft.getTargetFile().getAbsolutePath(), artifactId,
+                "an uncontested name must be used as requested");
+        assertEquals("rows", Files.readString(Path.of(artifactId)));
+    }
+
+    @Test
     void concurrentDraftsReserveDifferentTargetsAndPublishIndependently() throws IOException {
         ArtifactService service = new ArtifactServiceImpl();
         var first = service.createDraft(1L, TaskArtifactRole.OUTPUT, tempDirectory.toString(), "export.csv",

@@ -43,4 +43,18 @@ public final class TaskExecutionMode {
     public static boolean isFast(String mode) {
         return isUltraFast(mode);
     }
+
+    /**
+     * Rejects an execution mode the pipeline cannot honour. Export today only implements the
+     * conservative single-threaded path, so accepting {@code FAST} / {@code ULTRA_FAST} and silently
+     * exporting as standard would report a speed the task never delivered.
+     *
+     * @throws IllegalArgumentException when the mode asks for parallel execution
+     */
+    public static void requireSupportedForExport(String mode) {
+        if (isUltraFast(mode)) {
+            throw new IllegalArgumentException("Parallel export is not available in this build: "
+                    + StringUtils.trimToEmpty(mode));
+        }
+    }
 }

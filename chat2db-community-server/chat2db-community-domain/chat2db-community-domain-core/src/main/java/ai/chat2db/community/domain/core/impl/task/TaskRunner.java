@@ -72,7 +72,7 @@ final class TaskRunner<S extends TaskSpec> implements Runnable {
             bindExecutionContext();
             taskExtensionManager.runGuarded(submission.extensionContext(), () -> {
                 try (Chat2DBContext.StatementGuardScope ignored =
-                        Chat2DBContext.bindStatementGuard(taskExtensionManager::beforeStatement)) {
+                        Chat2DBContext.bindStatementGuard(taskExtensionManager.captureStatementGuard())) {
                     taskExecutor.execute(submission.spec(), executionContext);
                 }
             });
@@ -166,6 +166,20 @@ final class TaskRunner<S extends TaskSpec> implements Runnable {
             }
             String primaryArtifactId = null;
             for (ArtifactDraft draft : drafts) {
+                // Record the intended target before the file move: a crash between the move and the
+                // artifact row would otherwise leave a published file nobody knows about.
+                if (draft.getTargetFile() != null) {
+                    taskStorage.appendEvent(TaskEvent.builder()
+                            .taskId(submission.taskId())
+                            .level(TaskEventLevel.INFO.name())
+                            .code(TaskEventCode.ARTIFACT_PUBLICATION_STARTED.name())
+                            .stage(TaskStage.FINALIZING.name())
+                            .message("Saving export file")
+                            .details(Map.of(TaskConstants.ARTIFACT_ID_DETAIL_KEY,
+                                    draft.getTargetFile().getAbsolutePath(),
+                                    TaskConstants.ARTIFACT_ROLE_DETAIL_KEY, String.valueOf(draft.getRole())))
+                            .build());
+                }
                 String artifactId = artifactService.publish(draft);
                 published.add(artifactId);
                 if (primaryArtifactId == null || TaskArtifactRole.OUTPUT.equals(draft.getRole())) {

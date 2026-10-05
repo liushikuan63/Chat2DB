@@ -19,6 +19,7 @@ import ai.chat2db.community.domain.api.model.task.TaskEventLevel;
 import ai.chat2db.community.domain.api.model.task.TaskQuery;
 import ai.chat2db.community.domain.api.model.task.TaskSpec;
 import ai.chat2db.community.domain.api.model.task.TaskStatus;
+import ai.chat2db.community.domain.api.model.task.TaskExecutionMode;
 import ai.chat2db.community.domain.api.model.task.TaskStage;
 import ai.chat2db.community.domain.api.model.task.TaskTargetSnapshot;
 import ai.chat2db.community.domain.api.model.task.TaskType;
@@ -45,6 +46,7 @@ import ai.chat2db.spi.sql.Chat2DBContext;
 import ai.chat2db.spi.model.imports.ImportResourceSnapshot;
 import com.alibaba.fastjson2.JSON;
 import com.google.common.util.concurrent.Striped;
+import jakarta.annotation.PostConstruct;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.lang3.StringUtils;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -104,10 +106,8 @@ public class TaskServiceImpl implements TaskService {
         this(taskStorage, localTaskManager, artifactService, connectionContextService, null);
     }
 
-    /**
-     * Retries artifact deletions that a previous run staged but did not finish. Startup calls this so a
-     * half-published artifact never lingers when the process that produced it died mid-deletion.
-     */
+    /** Retries deletions interrupted by a crash or restart; the queue is durable. */
+    @PostConstruct
     void recoverInterruptedArtifactDeletions() {
         if (deletionService != null) {
             deletionService.retryPendingDeletions();
@@ -120,6 +120,8 @@ public class TaskServiceImpl implements TaskService {
 
     @Override
     public Long submitExport(ExportTaskSpec spec) {
+        // Fail fast rather than running a standard export while the UI promises the fast mode.
+        TaskExecutionMode.requireSupportedForExport(spec == null ? null : spec.getMode());
         return submit(spec);
     }
 
