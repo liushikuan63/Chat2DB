@@ -43,6 +43,9 @@ public final class TerminalSessionManager {
     private static final TerminalEventPublisher JCEF_EVENT_PUBLISHER = TerminalSessionManager::publishToJcef;
     private static volatile TerminalEventPublisher eventPublisher = JCEF_EVENT_PUBLISHER;
 
+    /** How long a killed shell may take to release its process before it is ended forcibly. */
+    private static final long TERMINATION_TIMEOUT_MILLIS = 3000L;
+
     private TerminalSessionManager() {
     }
 
@@ -236,8 +239,34 @@ public final class TerminalSessionManager {
         TerminalSession session = SESSIONS.remove(sessionId);
         if (session != null) {
             session.close();
-            getAliveDescendants(session.process()).forEach(ProcessHandle::destroy);
+            List<ProcessHandle> descendants = getAliveDescendants(session.process());
+            descendants.forEach(ProcessHandle::destroy);
             session.process().destroy();
+            awaitTermination(session.process(), descendants);
+        }
+    }
+
+    /**
+     * Waits for a killed session's process to really exit.
+     *
+     * <p>{@code destroy()} only requests termination: it returns while the process is still running,
+     * and on Windows a live process keeps a handle on its working directory. A caller that kills a
+     * session and immediately reuses or deletes that directory — the application when the user
+     * closes a terminal, and the test suite when it cleans up a temporary directory — then fails on
+     * a process that is already "gone" as far as the session API is concerned.
+     */
+    private static void awaitTermination(PtyProcess process, List<ProcessHandle> descendants) {
+        try {
+            if (process.waitFor(TERMINATION_TIMEOUT_MILLIS, TimeUnit.MILLISECONDS)) {
+                return;
+            }
+            log.warn("Terminal session {} did not exit within {}ms; destroying it forcibly",
+                    process.pid(), TERMINATION_TIMEOUT_MILLIS);
+            descendants.stream().filter(ProcessHandle::isAlive).forEach(ProcessHandle::destroyForcibly);
+            process.destroyForcibly();
+            process.waitFor(TERMINATION_TIMEOUT_MILLIS, TimeUnit.MILLISECONDS);
+        } catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
         }
     }
 
