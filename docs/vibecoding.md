@@ -284,7 +284,7 @@ mvn -B -o -f chat2db-community-server/pom.xml -pl '<module>' -am \
 - VB-011 已覆盖“失败 → 回滚 → 重试不丢行”的完整链路，但用的是单节点导入路径 + 延迟持久化上下文；**没有**从 `ImportManifestScheduler` 驱动真实分片重试（调度器自身的重试用例在 `ImportManifestSchedulerTest.retriesADeadlockedShardBeforePersistingDone`）。
 - VB-005 的清理路径由既有参数化用例覆盖（`ARTIFACT_PUBLICATION_STARTED` 与 `ARTIFACT_PUBLISHED` 两个分支都会删除孤儿产物），但**没有**做“move 与落库之间 kill 进程”的真实故障注入。
 - VB-003 只在当前文件系统验证；Windows / macOS 上的原子占位行为未实测。
-- **前端浏览器实跑：已完成**。真实 Chrome（Playwright）驱动后端 `chat2db-community.jar`（127.0.0.1:10825）+ 前端 dev server（127.0.0.1:8889）：
+- **前端浏览器实跑：已完成**。真实 Chrome（Playwright）驱动后端 `chat2db-community.jar`（127.0.0.1:10825）+ 前端 dev server（127.0.0.1:8889）。截图与驱动脚本都在 `%TEMP%\dsh-c2db-ui\`（`shots\` 为截图、`verify-taskcenter*.cjs` 为可重跑的验证脚本）——这是临时目录，需要留存请先另行拷贝。
   - 页面正常渲染并走通真实 UI 的“新建 H2 数据源”全流程（截图 `01-landing.png`、`06-h2-form.png`、`08-h2-test.png`、`09-connection-saved.png`）。
   - 双重取证：同一轮 `POST /api/connection/datasource/create` 为 `200 application/json`，而故意编造的 `/api/definitely-not-a-real-endpoint-xyz` 为 `200 text/html`（SPA fallback）——两者不同形，证明 200 不代表接口存在。
   - **VB-012 恢复按钮已在浏览器中验证**：打开任务中心需要先点标题栏 `TaskCenterStatusBadge` 内层节点、再点记录切换器第 2 个 tab（按 `workspaceRecordConfig` 顺序 `[执行记录, 任务中心, 已保存控制台]`）。拦截 `/api/tasks/list` 注入两条任务后：
