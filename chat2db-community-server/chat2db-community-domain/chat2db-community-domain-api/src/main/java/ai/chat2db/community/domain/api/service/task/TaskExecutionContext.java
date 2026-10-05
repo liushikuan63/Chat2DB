@@ -38,6 +38,16 @@ public interface TaskExecutionContext extends ISqlExecutionStatementListener {
         checkCancelled();
     }
 
+    /**
+     * True when the executor runs inside a transaction that only commits after
+     * {@code TaskExecutor#execute} returns. Rows written per batch are then not durable yet, so
+     * batch-level resume watermarks must not be published: a later rollback would leave the
+     * watermark claiming rows that were discarded.
+     */
+    default boolean defersRowDurabilityToCommit() {
+        return false;
+    }
+
     /** Leaves a scoped commit boundary. A final task-wide commit may intentionally omit this. */
     default void exitCommitPhase() {
     }

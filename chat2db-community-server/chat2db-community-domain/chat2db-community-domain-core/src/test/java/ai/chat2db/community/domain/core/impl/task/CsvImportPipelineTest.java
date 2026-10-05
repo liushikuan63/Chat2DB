@@ -144,6 +144,8 @@ class CsvImportPipelineTest {
         assertEquals(1, rejectDrafts.size());
         String rejects = Files.readString(rejectDrafts.get(0), StandardCharsets.UTF_8);
         assertTrue(rejects.contains("this-value-is-too-long"), rejects);
+        // Rows are numbered by their position among the data rows, the same unit the Excel path and
+        // the batcher's resume watermark use; the header is not a data row, so the rejected row is 2.
         assertTrue(rejects.contains("\"row\":2"), rejects);
 
         List<String> codes = storage.listEvents(taskId, 0L, 100).stream().map(TaskEvent::getCode).toList();
