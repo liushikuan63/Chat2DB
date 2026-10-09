@@ -1,5 +1,6 @@
 package ai.chat2db.community.storage.task;
 
+import ai.chat2db.community.domain.api.model.task.ResumeState;
 import ai.chat2db.community.domain.api.model.task.Task;
 import ai.chat2db.community.domain.api.model.task.ImportManifest;
 import ai.chat2db.community.domain.api.model.task.TaskArtifact;
@@ -100,6 +101,21 @@ final class TaskRows {
             statement.setString(2, manifest.getManifestFingerprint());
             statement.setString(3, JSON.toJSONString(manifest));
             statement.setLong(4, System.currentTimeMillis());
+            statement.executeUpdate();
+        }
+    }
+
+    static void insertResumeState(Connection connection, Long taskId, ResumeState state) throws SQLException {
+        try (PreparedStatement statement = connection.prepareStatement(
+                "INSERT INTO resume_state (task_id, shard_no, kind, cursor_json, rows_done, bytes_done, updated_at)"
+                        + " VALUES (?, ?, ?, ?, ?, ?, ?)")) {
+            statement.setLong(1, taskId);
+            statement.setInt(2, state.getShardNo());
+            statement.setString(3, state.getKind());
+            statement.setString(4, state.getCursorJson());
+            setLong(statement, 5, state.getRowsDone());
+            setLong(statement, 6, state.getBytesDone());
+            statement.setLong(7, (state.getUpdatedAt() == null ? new Date() : state.getUpdatedAt()).getTime());
             statement.executeUpdate();
         }
     }

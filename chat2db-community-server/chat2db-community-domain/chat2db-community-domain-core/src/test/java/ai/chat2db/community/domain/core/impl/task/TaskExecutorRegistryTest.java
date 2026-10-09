@@ -41,6 +41,7 @@ import java.util.Optional;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BiConsumer;
+import java.util.function.Consumer;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -159,9 +160,11 @@ class TaskExecutorRegistryTest {
                     draftReference.set(draft);
                     context.write("value");
                 });
+        AtomicLong publicationAttempts = new AtomicLong();
         ArtifactService failingArtifactService = new ArtifactServiceImpl() {
             @Override
-            public String publish(ArtifactDraft ignored) {
+            public String publish(ArtifactDraft ignored, Consumer<String> onTargetCreated) {
+                publicationAttempts.incrementAndGet();
                 throw new IllegalStateException("Publish failed");
             }
         };
@@ -175,12 +178,16 @@ class TaskExecutorRegistryTest {
         runner.run();
 
         Task failed = storage.get(task.getId()).orElseThrow();
+        assertEquals(1L, publicationAttempts.get(), "the recovery-aware publication must hit the failure fixture");
         assertEquals(TaskStatus.FAILED.name(), failed.getStatus());
         assertEquals(TaskErrorCode.ARTIFACT_PUBLISH_FAILED.name(), failed.getErrorCode());
         assertFalse(storage.statusTransitions().contains(TaskStatus.SUCCESS.name()));
         ArtifactDraft draft = draftReference.get();
         assertFalse(Files.exists(draft.getTemporaryFile().toPath()));
         assertFalse(Files.exists(draft.getTargetFile().toPath()));
+        assertTrue(storage.listArtifacts(task.getId()).isEmpty());
+        assertTrue(runningTask.isClosed());
+        assertTrue(runningTaskRegistry.get(task.getId()) == null);
     }
 
     private TaskServiceImpl taskService(RecordingTaskStorage storage) {

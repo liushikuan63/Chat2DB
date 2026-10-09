@@ -65,6 +65,28 @@ class TaskDeletionServiceImplTest {
     }
 
     @Test
+    void everyArtifactOfATaskIsRemovedNotOnlyThePrimaryOne() throws IOException {
+        Path primary = Files.writeString(tempDirectory.resolve("orders.csv"), "rows");
+        Path rejects = Files.writeString(tempDirectory.resolve("orders-rejects.csv"), "rejected rows");
+        Path report = Files.writeString(tempDirectory.resolve("orders-report.json"), "{}");
+        Path neighbour = Files.writeString(tempDirectory.resolve("other.csv"), "not this task");
+        RecordingTaskStorage storage = storage(1L, primary);
+        storage.artifacts.put(1L, List.of(
+                TaskArtifact.builder().artifactId(primary.toString()).role("OUTPUT").build(),
+                TaskArtifact.builder().artifactId(rejects.toString()).role("REJECT").build(),
+                TaskArtifact.builder().artifactId(report.toString()).role("IMPORT_REPORT").build()));
+
+        tasks(storage).delete(1L);
+
+        assertTrue(storage.get(1L).isEmpty());
+        assertFalse(Files.exists(primary), "the primary artifact must be deleted");
+        assertFalse(Files.exists(rejects), "a reject summary must not be left behind");
+        assertFalse(Files.exists(report), "an import report must not be left behind");
+        assertTrue(Files.exists(neighbour), "an unrelated file must survive");
+        assertEquals("[]", Files.readString(journalFile().toPath()));
+    }
+
+    @Test
     void successfulDeletionRemovesTaskArtifactAndArrayEntry() throws IOException {
         Path artifact = Files.writeString(tempDirectory.resolve("export.csv"), "value");
         RecordingTaskStorage storage = storage(1L, artifact);
@@ -412,8 +434,14 @@ class TaskDeletionServiceImplTest {
     }
 
     private PendingTaskDeletion intent(Long id, Path artifact, int attempts) {
-        return new PendingTaskDeletion(id, artifact.toString(),
-                artifact.resolveSibling("." + artifact.getFileName() + ".task-delete-" + id).toString(), attempts, null);
+        // Written the way an earlier release did: one original and one staged path.
+        PendingTaskDeletion pending = new PendingTaskDeletion();
+        pending.setTaskId(id);
+        pending.setOriginalPath(artifact.toString());
+        pending.setStagedPath(artifact.resolveSibling("." + artifact.getFileName() + ".task-delete-" + id)
+                .toString());
+        pending.setAttempts(attempts);
+        return pending;
     }
 
     private void writeQueue(PendingTaskDeletion... pending) throws IOException {

@@ -19,6 +19,7 @@ import ai.chat2db.community.domain.api.model.task.TaskEventLevel;
 import ai.chat2db.community.domain.api.model.task.TaskQuery;
 import ai.chat2db.community.domain.api.model.task.TaskSpec;
 import ai.chat2db.community.domain.api.model.task.TaskStatus;
+import ai.chat2db.community.domain.api.model.task.TaskExecutionMode;
 import ai.chat2db.community.domain.api.model.task.TaskStage;
 import ai.chat2db.community.domain.api.model.task.TaskTargetSnapshot;
 import ai.chat2db.community.domain.api.model.task.TaskType;
@@ -32,9 +33,10 @@ import ai.chat2db.community.domain.core.impl.task.imports.ImportFileProbe;
 import ai.chat2db.community.domain.core.impl.task.imports.ImportParallelAdmission;
 import ai.chat2db.community.domain.core.impl.task.imports.ImportTaskSourceSupport;
 import ai.chat2db.community.domain.core.impl.task.imports.excel.ImportPreviewListener;
+import ai.chat2db.community.domain.core.impl.task.imports.reader.CsvImportReader;
+import ai.chat2db.community.domain.core.impl.task.imports.excel.CSVImporter;
 import com.alibaba.excel.EasyExcel;
 import com.alibaba.excel.support.ExcelTypeEnum;
-import org.apache.commons.csv.CSVFormat;
 import ai.chat2db.community.tools.exception.BusinessException;
 import ai.chat2db.community.tools.exception.DataNotFoundException;
 import ai.chat2db.community.tools.model.Context;
@@ -45,6 +47,7 @@ import ai.chat2db.spi.sql.Chat2DBContext;
 import ai.chat2db.spi.model.imports.ImportResourceSnapshot;
 import com.alibaba.fastjson2.JSON;
 import com.google.common.util.concurrent.Striped;
+import jakarta.annotation.PostConstruct;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.lang3.StringUtils;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -104,10 +107,8 @@ public class TaskServiceImpl implements TaskService {
         this(taskStorage, localTaskManager, artifactService, connectionContextService, null);
     }
 
-    /**
-     * Retries artifact deletions that a previous run staged but did not finish. Startup calls this so a
-     * half-published artifact never lingers when the process that produced it died mid-deletion.
-     */
+    /** Retries deletions interrupted by a crash or restart; the queue is durable. */
+    @PostConstruct
     void recoverInterruptedArtifactDeletions() {
         if (deletionService != null) {
             deletionService.retryPendingDeletions();
@@ -120,6 +121,8 @@ public class TaskServiceImpl implements TaskService {
 
     @Override
     public Long submitExport(ExportTaskSpec spec) {
+        // Fail fast rather than running a standard export while the UI promises the fast mode.
+        TaskExecutionMode.requireSupportedForExport(spec == null ? null : spec.getMode());
         return submit(spec);
     }
 
@@ -198,21 +201,14 @@ public class TaskServiceImpl implements TaskService {
 
     private ImportPreview previewCsv(java.io.File source, ImportTaskSpec spec, List<TableColumn> tableColumns,
             ImportResourceSnapshot resources) {
-        try {
-            java.nio.charset.Charset charset = ImportFileProbe.effectiveCharset(source,
-                    spec.getOptions() == null ? null : spec.getOptions().getCharset());
-            char quote = ImportFileProbe.quoteChar(
-                    spec.getOptions() == null ? null : spec.getOptions().getQuoteChar());
-            char delimiter = ImportFileProbe.delimiterChar(
-                    spec.getOptions() == null ? null : spec.getOptions().getDelimiter(), charset, source);
-            CSVFormat format = ImportFileProbe.csvFormat(delimiter, quote);
-            List<List<String>> rows = ImportFileProbe.readSample(source, charset, format,
-                    ImportFileProbe.sampleRows());
-            return buildPreview(rows, tableColumns, spec, charset.name(), String.valueOf(delimiter),
-                    resources);
-        } catch (java.io.IOException e) {
-            throw new BusinessException("task.import.preview.failed", null, e);
-        }
+        var options = ImportFileProbe.effectiveCsvOptions(spec);
+        String nullString = spec.getOptions() == null ? null : spec.getOptions().getNullString();
+        List<List<String>> rows = new ArrayList<>();
+        CsvImportReader.read(source, options, ImportFileProbe.sampleRows(), CSVImporter.mappedSourceColumnCount(spec),
+                header -> rows.add(new ArrayList<>(header.values())),
+                (row, number) -> rows.add(new ArrayList<>(ImportFileProbe.normalizeNullLiteral(row, nullString)
+                        .values())), () -> { });
+        return buildPreview(rows, tableColumns, spec, options.getEncoding(), options.getDelimiter(), resources);
     }
 
     private ImportPreview previewExcel(java.io.File source, ImportTaskSpec spec, List<TableColumn> tableColumns,
