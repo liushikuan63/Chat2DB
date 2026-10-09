@@ -25,6 +25,16 @@ export interface ImportExportFormValue {
   sqlExporterProfile?: SqlExporterProfile;
 }
 
+export const buildCsvImportOptions = (formValue: ImportExportFormValue): IImportOptions => ({
+  charset: formValue.charset || undefined,
+  delimiter: formValue.delimiter || undefined,
+  quoteChar: formValue.quoteChar || undefined,
+  skipRows: formValue.skipRows || undefined,
+  nullString: formValue.nullString || undefined,
+  onError: formValue.onError || undefined,
+  maxErrors: formValue.onError === 'SKIP' ? formValue.maxErrors || undefined : undefined,
+});
+
 interface BuildTaskParamsInput {
   boundInfo: ImportExportDataBoundInfo;
   formValue: ImportExportFormValue;
@@ -61,7 +71,7 @@ export function buildTaskParams({
     databaseName,
     schemaName,
     format: formValue.exportType,
-    mode,
+    mode: boundInfo.type === ImportExportType.EXPORT ? ('STANDARD' as const) : mode,
   };
 
   if (boundInfo.type === ImportExportType.EXPORT) {
@@ -106,15 +116,7 @@ export function buildTaskParams({
         : undefined
       : {
           ...(formValue.exportType === ImportExportFileType.CSV
-            ? {
-                charset: formValue.charset || undefined,
-                delimiter: formValue.delimiter || undefined,
-                quoteChar: formValue.quoteChar || undefined,
-                skipRows: formValue.skipRows || undefined,
-                nullString: formValue.nullString || undefined,
-                onError: formValue.onError || undefined,
-                maxErrors: formValue.onError === 'SKIP' ? formValue.maxErrors || undefined : undefined,
-              }
+            ? buildCsvImportOptions(formValue)
             : {}),
           ...(mappingList ? { columnMappings: mappingList } : {}),
         };

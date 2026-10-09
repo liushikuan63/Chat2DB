@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict';
 
+import { importModule } from '@/testUtils/importModule';
+
 const globalObj = globalThis as unknown as Record<string, unknown>;
 globalObj.__RUNTIME_ENV__ = 'community';
 globalObj.__ENV__ = 'test';
@@ -20,7 +22,7 @@ async function runShortcutTests() {
     getEventShortcutBinding,
     isShortcutCaptureAllowed,
     shortcutBindingToMonacoKeybinding,
-  } = await import('./shortcut');
+  } = await importModule<typeof import('./shortcut')>(() => import('./shortcut'));
 
   // 1. Verify Default Shortcuts for Line Comment and Block Comment
   type DefaultConfigKey = keyof typeof DEFAULT_SHORTCUT_CONFIG;

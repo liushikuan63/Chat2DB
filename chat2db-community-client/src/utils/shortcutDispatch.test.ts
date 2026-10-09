@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict';
 
+import { importModule } from '@/testUtils/importModule';
+
 const globalObj = globalThis as unknown as Record<string, unknown>;
 globalObj.__RUNTIME_ENV__ = 'community';
 globalObj.__ENV__ = 'test';
@@ -14,7 +16,10 @@ if (typeof globalThis.navigator === 'undefined') {
 
 async function run() {
   const [{ getEffectiveShortcutConfigMap, ShortcutAction, ShortcutScope }, { resolveShortcutDispatch }] =
-    await Promise.all([import('@/constants/shortcut'), import('./shortcutDispatch')]);
+    await Promise.all([
+      importModule<typeof import('@/constants/shortcut')>(() => import('@/constants/shortcut')),
+      importModule<typeof import('./shortcutDispatch')>(() => import('./shortcutDispatch')),
+    ]);
   const event = {
     key: 's',
     code: 'KeyS',

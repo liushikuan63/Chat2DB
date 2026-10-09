@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict';
 
+import { importModule } from '@/testUtils/importModule';
+
 const globalObj = globalThis as unknown as {
   __RUNTIME_ENV__?: string;
   __ENV__?: string;
@@ -43,7 +45,11 @@ function createShortcutEvent() {
 
 async function run() {
   const [{ ShortcutAction }, { canHandleWebFrameZoom, handleWebFrameZoom }, { prepareGlobalShortcutHandling }] =
-    await Promise.all([import('@/constants/shortcut'), import('./jcefZoom'), import('./shortcutDispatch')]);
+    await Promise.all([
+      importModule<typeof import('@/constants/shortcut')>(() => import('@/constants/shortcut')),
+      importModule<typeof import('./jcefZoom')>(() => import('./jcefZoom')),
+      importModule<typeof import('./shortcutDispatch')>(() => import('./shortcutDispatch')),
+    ]);
   const zoomCases = [
     [ShortcutAction.ZoomIn, 'in', 'zoomIn'],
     [ShortcutAction.ZoomOut, 'out', 'zoomOut'],

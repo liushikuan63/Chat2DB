@@ -1,5 +1,6 @@
 package ai.chat2db.community.storage.task;
 
+import ai.chat2db.community.domain.api.model.task.ResumeState;
 import ai.chat2db.community.domain.api.model.task.Task;
 import ai.chat2db.community.domain.api.model.task.ImportManifestIntegrity;
 import ai.chat2db.community.domain.api.model.task.TaskArtifact;
@@ -44,12 +45,15 @@ public class TaskStorageMigrator {
 
     private final File legacyDirectory;
 
+    private final String storageBasePath;
+
     public TaskStorageMigrator(String storageBasePath) {
         this(new TaskDatabase(storageBasePath), storageBasePath);
     }
 
     TaskStorageMigrator(TaskDatabase database, String storageBasePath) {
         this.database = database;
+        this.storageBasePath = storageBasePath;
         this.legacyDirectory = new File(storageBasePath, FileTaskStorage.TASK_STORAGE_DIRECTORY);
     }
 
@@ -62,10 +66,27 @@ public class TaskStorageMigrator {
             warnAboutFilesWrittenAfterMigration();
             return 0;
         }
+        recoverLegacyStorage();
         Map<Long, ImportedTask> imported = readLegacyTasks();
         int count = importTasks(imported);
         renameLegacyDirectory(imported.size());
         return count;
+    }
+
+    /**
+     * Replays the legacy store's own crash recovery before anything is read.
+     *
+     * <p>A process killed between writing a transition journal / event and updating the task
+     * snapshot leaves the snapshot behind the last durable record. Importing those raw files would
+     * turn a completed task back into a running one, which startup reconciliation then fails and
+     * whose published artifacts it then deletes. Constructing the legacy store runs exactly the
+     * recovery the old deployment relied on, so the migration reads a consistent snapshot.
+     */
+    private void recoverLegacyStorage() {
+        if (!legacyDirectory.isDirectory()) {
+            return;
+        }
+        new FileTaskStorage(storageBasePath);
     }
 
     private boolean isMigrated() {
@@ -164,6 +185,12 @@ public class TaskStorageMigrator {
                     for (TaskEvent event : entry.events()) {
                         TaskRows.insertEvent(connection, event);
                     }
+                    // The file store kept checkpoints inside the task snapshot. Without them the task
+                    // is not resumable any more, so startup reconciliation would fail it instead of
+                    // offering a resume.
+                    for (ResumeState state : migratedResumeStates(entry.task())) {
+                        TaskRows.insertResumeState(connection, entry.task().getId(), state);
+                    }
                     for (TaskArtifact artifact : migratedArtifacts(entry.task())) {
                         TaskRows.upsertArtifact(connection, entry.task().getId(), artifact);
                     }
@@ -183,6 +210,23 @@ public class TaskStorageMigrator {
         } catch (SQLException e) {
             throw new IllegalStateException("Could not import legacy task storage", e);
         }
+    }
+
+    /**
+     * Checkpoints the legacy snapshot carried. Entries without a shard identity or kind cannot be
+     * resumed and are skipped rather than written as unusable rows.
+     */
+    private static List<ResumeState> migratedResumeStates(Task task) {
+        List<ResumeState> states = new ArrayList<>();
+        if (task.getResumeStates() == null) {
+            return states;
+        }
+        for (ResumeState state : task.getResumeStates()) {
+            if (state != null && state.getShardNo() != null && StringUtils.isNotBlank(state.getKind())) {
+                states.add(state);
+            }
+        }
+        return states;
     }
 
     /**

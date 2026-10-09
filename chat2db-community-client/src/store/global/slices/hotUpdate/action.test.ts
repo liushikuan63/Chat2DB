@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict';
 
+import { importModule } from '@/testUtils/importModule';
+
 const globalObject = globalThis as unknown as {
   __RUNTIME_ENV__?: string;
   __ENV__?: string;
@@ -52,11 +54,13 @@ function restoreGlobal<T extends keyof typeof globalObject>(key: T, value: (type
 
 async function run() {
   const [{ createHotUpdateAction }, { default: jcefApi }, { UpdatedStatus }] = await Promise.all([
-    import('./action'),
+    importModule<typeof import('./action')>(() => import('./action')),
     import('@/jcef'),
-    import('@/constants/settings'),
+    importModule<typeof import('@/constants/settings')>(() => import('@/constants/settings')),
   ]);
-  const { clientRuntime } = await import('@/client-runtime');
+  const { clientRuntime } = await importModule<typeof import('@/client-runtime')>(
+    () => import('@/client-runtime'),
+  );
   assert.equal(clientRuntime.supportsBetaUpdates, true);
   const originalApi = {
     appCheckUpdate: jcefApi.appCheckUpdate,
