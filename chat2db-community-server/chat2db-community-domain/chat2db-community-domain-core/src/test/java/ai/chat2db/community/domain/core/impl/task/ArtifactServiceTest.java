@@ -42,6 +42,92 @@ class ArtifactServiceTest {
     Path tempDirectory;
 
     @Test
+    void publicationRecordsTheClaimedTargetBeforeMovingTheDraft() throws IOException {
+        ArtifactService service = new ArtifactServiceImpl();
+        var draft = service.createDraft(7L, tempDirectory.toString(), "export.csv", "text/csv");
+        Files.writeString(draft.getTemporaryFile().toPath(), "generated rows");
+        AtomicInteger callbacks = new AtomicInteger();
+
+        String artifactId = service.publish(draft, target -> {
+            callbacks.incrementAndGet();
+            assertTrue(Files.exists(draft.getTemporaryFile().toPath()),
+                    "recovery must know the owned target before the draft is moved");
+            assertEquals(0L, Path.of(target).toFile().length(),
+                    "the listener must see the claimed empty target before publication");
+        });
+
+        assertEquals(1, callbacks.get());
+        assertEquals("generated rows", Files.readString(Path.of(artifactId)));
+        assertFalse(Files.exists(draft.getTemporaryFile().toPath()));
+    }
+
+    @Test
+    void rejectedPublicationRecordPreservesTheDraftAndReleasesTheClaim() throws IOException {
+        ArtifactService service = new ArtifactServiceImpl();
+        var draft = service.createDraft(7L, tempDirectory.toString(), "export.csv", "text/csv");
+        Files.writeString(draft.getTemporaryFile().toPath(), "generated rows");
+
+        assertThrows(IllegalStateException.class, () -> service.publish(draft, target -> {
+            throw new IllegalStateException("recovery record unavailable");
+        }));
+
+        assertEquals("generated rows", Files.readString(draft.getTemporaryFile().toPath()));
+        assertFalse(Files.exists(draft.getTargetFile().toPath()));
+    }
+
+    @Test
+    void failedMoveReleasesItsClaimedEmptyTarget() throws IOException {
+        ArtifactService service = new ArtifactServiceImpl();
+        var draft = service.createDraft(7L, tempDirectory.toString(), "export.csv", "text/csv");
+        Files.writeString(draft.getTemporaryFile().toPath(), "generated rows");
+
+        assertThrows(IllegalStateException.class, () -> service.publish(draft, target -> {
+            try {
+                Files.delete(draft.getTemporaryFile().toPath());
+            } catch (IOException e) {
+                throw new IllegalStateException(e);
+            }
+        }));
+
+        assertFalse(Files.exists(draft.getTargetFile().toPath()),
+                "a failed move must not leave its empty publication claim behind");
+    }
+
+    @Test
+    void publishingNeverOverwritesAFileCreatedAfterTheDraftWasReserved() throws IOException {
+        ArtifactService service = new ArtifactServiceImpl();
+        var draft = service.createDraft(7L, TaskArtifactRole.OUTPUT, tempDirectory.toString(), "export.csv",
+                "text/csv");
+        Files.writeString(draft.getTemporaryFile().toPath(), "generated rows");
+
+        // Somebody else takes the reserved name after the draft was created.
+        Path squatter = draft.getTargetFile().toPath();
+        Files.writeString(squatter, "pre-existing user file");
+
+        String artifactId = service.publish(draft);
+
+        assertEquals("pre-existing user file", Files.readString(squatter),
+                "an export must never overwrite a file it did not create");
+        assertNotEquals(squatter.toAbsolutePath().toString(), artifactId,
+                "the export must land under a different name");
+        assertEquals("generated rows", Files.readString(Path.of(artifactId)));
+    }
+
+    @Test
+    void publishingToAFreeNameKeepsTheRequestedName() throws IOException {
+        ArtifactService service = new ArtifactServiceImpl();
+        var draft = service.createDraft(8L, TaskArtifactRole.OUTPUT, tempDirectory.toString(), "export.csv",
+                "text/csv");
+        Files.writeString(draft.getTemporaryFile().toPath(), "rows");
+
+        String artifactId = service.publish(draft);
+
+        assertEquals(draft.getTargetFile().getAbsolutePath(), artifactId,
+                "an uncontested name must be used as requested");
+        assertEquals("rows", Files.readString(Path.of(artifactId)));
+    }
+
+    @Test
     void concurrentDraftsReserveDifferentTargetsAndPublishIndependently() throws IOException {
         ArtifactService service = new ArtifactServiceImpl();
         var first = service.createDraft(1L, TaskArtifactRole.OUTPUT, tempDirectory.toString(), "export.csv",

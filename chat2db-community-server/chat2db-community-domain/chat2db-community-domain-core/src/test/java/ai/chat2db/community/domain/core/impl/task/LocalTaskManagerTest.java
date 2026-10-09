@@ -650,6 +650,31 @@ class LocalTaskManagerTest {
     }
 
     @Test
+    void publicationRecoveryRecordsTheOwnedCollisionTargetInsteadOfAnExternalFile() throws Exception {
+        TestTaskStorage storage = new TestTaskStorage();
+        Path externalFile = tempDirectory.resolve("export.csv");
+        taskManager = manager(storage, (spec, context) -> {
+            ArtifactDraft draft = context.createArtifact(tempDirectory.toString(), "export.csv", "text/csv");
+            writeQuietly(draft.getTemporaryFile().toPath(), "generated rows");
+            writeQuietly(externalFile, "external user file");
+        });
+        Task task = newTask();
+
+        taskManager.submit(task, event(TaskEventCode.TASK_CREATED.name()), spec(), null, null);
+
+        assertTrue(storage.awaitTerminal());
+        Task completed = storage.get(task.getId()).orElseThrow();
+        List<TaskEvent> publicationRecords = storage.listEvents(task.getId(), 0, 100).stream()
+                .filter(item -> TaskEventCode.ARTIFACT_PUBLICATION_STARTED.name().equals(item.getCode()))
+                .toList();
+        assertEquals(1, publicationRecords.size());
+        assertEquals(completed.getArtifactId(), publicationRecords.get(0).getDetails()
+                .get(TaskConstants.ARTIFACT_ID_DETAIL_KEY),
+                "recovery must reclaim the path actually owned by the task");
+        assertEquals("external user file", Files.readString(externalFile));
+    }
+
+    @Test
     void failedTaskPublishesDiagnosticsButDeletesOrdinaryOutput() throws Exception {
         TestTaskStorage storage = new TestTaskStorage();
         taskManager = manager(storage, (spec, context) -> {
@@ -682,6 +707,12 @@ class LocalTaskManagerTest {
         assertEquals(2L, storage.listEvents(task.getId(), 0, 100).stream()
                 .filter(item -> TaskEventCode.ARTIFACT_PUBLISHED.name().equals(item.getCode()))
                 .count());
+        List<String> recordedTargets = storage.listEvents(task.getId(), 0, 100).stream()
+                .filter(item -> TaskEventCode.ARTIFACT_PUBLICATION_STARTED.name().equals(item.getCode()))
+                .map(item -> String.valueOf(item.getDetails().get(TaskConstants.ARTIFACT_ID_DETAIL_KEY)))
+                .toList();
+        assertEquals(diagnostics.stream().map(TaskArtifact::getArtifactId).toList(), recordedTargets,
+                "failure diagnostics need the same recovery records as successful outputs");
         for (TaskArtifact artifact : diagnostics) {
             Files.deleteIfExists(Path.of(artifact.getArtifactId()));
         }
