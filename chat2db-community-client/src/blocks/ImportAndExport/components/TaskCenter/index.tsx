@@ -7,6 +7,7 @@ import RunSqlModal from '@/blocks/ImportAndExport/components/RunSqlModal';
 import ImportFileModal from '@/blocks/ImportAndExport/components/ImportFileModal';
 import importExportServices from '@/service/importExport';
 import { useImportExportStore } from '@/store/importExport';
+import { isTaskResumable } from '@/store/importExport/taskCenterUtils';
 import LogModal from '@/blocks/ImportAndExport/components/LogModal';
 import { ACTIVE_TASK_STATUSES, ImportExportTaskStatus } from '@/constants/importExport';
 import dayjs from 'dayjs';
@@ -154,6 +155,9 @@ export default memo<TaskCenterProps>(({ headerLeading }) => {
           <>
             {taskList.map((item) => {
               const isActive = ACTIVE_TASK_STATUSES.includes(item.status);
+              // A task waiting to be resumed is PENDING, which counts as active; the resume action
+              // must therefore not live behind the `!isActive` branch or it can never render.
+              const isResumable = isTaskResumable(item);
               const statusLabel = i18n(TASK_STATUS_I18N_KEYS[item.status]);
               const startTime = formatTaskTime(item.startedAt, 'YYYY-MM-DD HH:mm:ss');
               const endTime = formatTaskTime(item.finishedAt);
@@ -230,6 +234,22 @@ export default memo<TaskCenterProps>(({ headerLeading }) => {
                           showInfo={false}
                         />
                         <span className={styles.taskProgressValue}>{progress}%</span>
+                      </div>
+                    )}
+                    {isResumable && (
+                      <div className={styles.taskActions}>
+                        <IconButton
+                          icon={RotateCw}
+                          title={i18n('workspace.task.action.resume')}
+                          tooltipPlacement="left"
+                          size={{ boxSize: 18, iconSize: 13, borderRadius: 3 }}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            importExportServices.resumeTask({ taskId: item.id }).then(() => {
+                              void getTaskList();
+                            });
+                          }}
+                        />
                       </div>
                     )}
                     {!isActive && (
