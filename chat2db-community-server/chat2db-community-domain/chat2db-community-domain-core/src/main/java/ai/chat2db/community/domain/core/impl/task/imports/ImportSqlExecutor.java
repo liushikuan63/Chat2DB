@@ -21,10 +21,17 @@ public final class ImportSqlExecutor {
 
     private final TaskExecutionContext context;
 
+    private final boolean batchInserts;
+
     private final AtomicInteger batchSequence = new AtomicInteger();
 
     public ImportSqlExecutor(TaskExecutionContext context) {
+        this(context, true);
+    }
+
+    public ImportSqlExecutor(TaskExecutionContext context, boolean batchInserts) {
         this.context = context;
+        this.batchInserts = batchInserts;
     }
 
     public void executeBatch(List<String> sqls) {
@@ -41,7 +48,7 @@ public final class ImportSqlExecutor {
                     continue;
                 }
                 statementCount++;
-                if (sql.trim().toUpperCase().startsWith("INSERT")) {
+                if (batchInserts && sql.trim().toUpperCase().startsWith("INSERT")) {
                     inserts.add(sql);
                     continue;
                 }
