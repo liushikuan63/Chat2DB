@@ -391,6 +391,16 @@ class TaskServiceImplTest {
             assertEquals(source.toFile().getAbsolutePath(), spec.getSourceFile());
             assertTrue(metadataReadWithBoundContext.get());
             assertNull(Chat2DBContext.getConnectInfo());
+            Files.writeString(source, "ID;IGNORED\n99;skip\n'1';keep\nNULL;keep\n",
+                    java.nio.charset.StandardCharsets.UTF_16LE);
+            spec.setOptions(ai.chat2db.community.domain.api.model.task.ImportOptions.builder()
+                    .charset("UTF-16LE").delimiter(";").quoteChar("'")
+                    .skipRows(1).nullString("NULL").build());
+            complete.setConnection(DriverManager.getConnection("jdbc:h2:mem:task_preview"));
+            ImportPreview configuredPreview = stagedService.previewImport(spec);
+            assertEquals(List.of("ID", "IGNORED"), configuredPreview.getFileColumns());
+            assertEquals(java.util.Arrays.asList(List.of("1", "keep"), java.util.Arrays.asList(null, "keep")),
+                    configuredPreview.getSampleRows(), "preview must apply the same settings as execution");
         }
     }
 

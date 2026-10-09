@@ -13,6 +13,7 @@ import ai.chat2db.community.domain.api.model.value.SQLDataValue;
 import ai.chat2db.community.domain.api.service.task.TaskExecutionContext;
 import ai.chat2db.community.domain.core.impl.task.AdaptiveBatchSizer;
 import ai.chat2db.community.domain.core.impl.task.AdaptiveConcurrencyGate;
+import ai.chat2db.community.domain.core.impl.task.ImportResumeJournalPolicy;
 import ai.chat2db.community.domain.core.impl.task.TaskResumeJournal;
 import ai.chat2db.community.domain.core.impl.task.imports.ImportColumnResolver.Resolution;
 import ai.chat2db.community.tools.model.Context;
@@ -196,6 +197,12 @@ public final class ImportRowBatcher implements AutoCloseable {
 
     private final TaskResumeJournal journal;
 
+    /**
+     * True when the enclosing transaction commits only after this batcher closes, so a batch that
+     * succeeded is not durable yet and must never be published as a resume watermark.
+     */
+    private final boolean defersRowDurabilityToCommit;
+
     /** Standard mode: serial path with a fixed batch size (see {@link TaskExecutionMode}). */
     private final boolean standardMode;
 
@@ -231,13 +238,18 @@ public final class ImportRowBatcher implements AutoCloseable {
         this.valueProcessor = valueProcessor;
         this.sqlBuilder = Chat2DBContext.getSqlBuilder();
         this.connectInfo = Chat2DBContext.getConnectInfo();
-        this.standardMode = !TaskExecutionMode.isUltraFast(spec.getMode());
-        this.sqlExecutor = new ImportSqlExecutor(context);
+        this.standardMode = !TaskExecutionMode.isUltraFast(spec.getMode())
+                || "XLS".equalsIgnoreCase(spec.getFormat()) || "XLSX".equalsIgnoreCase(spec.getFormat());
         this.sourceIdentity = sourceIdentity(spec);
         this.requestContext = ContextUtils.queryContext();
         this.statementGuard = Chat2DBContext.captureStatementGuard();
         this.loggingContext = MDC.getCopyOfContextMap();
         this.resumeBelowRow = resolveResumeBelowRow(spec, context);
+        this.defersRowDurabilityToCommit = context.defersRowDurabilityToCommit();
+        // Ordinary abort-on-error imports retain their historical committed prefix. Shards and
+        // SKIP replay need a transactional batch so rolled-back rows can be retried together.
+        this.sqlExecutor = new ImportSqlExecutor(context,
+                !standardMode || defersRowDurabilityToCommit || isSkipMode());
         if (resumeBelowRow > 0) {
             log.info("Import resume: the first {} rows are durable from the interrupted run; "
                     + "they will be skipped", resumeBelowRow);
@@ -430,12 +442,14 @@ public final class ImportRowBatcher implements AutoCloseable {
                 importedCount.add(rows);
                 fullyHandled = true;
             } catch (TaskCancelledException cancellation) {
+                recordSequentialPrefix(batch, cancellation);
                 throw cancellation;
             } catch (RuntimeException batchFailure) {
                 context.logError("IMPORT_BATCH_FAILED", "Could not import batch", Map.of(
                         "statementCount", rows,
                         "message", StringUtils.defaultString(batchFailure.getMessage())));
                 if (!isSkipMode()) {
+                    recordSequentialPrefix(batch, batchFailure);
                     throw batchFailure;
                 }
                 // In SKIP mode every row ends handled (imported or recorded in the reject file),
@@ -469,6 +483,29 @@ public final class ImportRowBatcher implements AutoCloseable {
                 }
                 batchCompleted();
             }
+        }
+    }
+
+    /** Retains the committed prefix without letting a later resume replay those rows. */
+    private void recordSequentialPrefix(PendingBatch batch, RuntimeException failure) {
+        int completed = Math.min(batch.sqls().size(), sqlExecutor.completedSequentialStatements());
+        if (completed == 0 || defersRowDurabilityToCommit) {
+            return;
+        }
+        importedCount.add(completed);
+        inFlightFirstRows.put(batch.seq(), batch.rowNumbers().get(completed - 1) + 1);
+        long rowsDone = durableWatermark() - 1;
+        if (journal != null) {
+            journal.progress("IMPORTING", rowsDone);
+        }
+        try {
+            // A failure is not a cadence boundary: force this watermark even for a short prefix.
+            context.checkpoint(ResumeState.builder().shardNo(0).kind(RESUME_KIND_IMPORT)
+                    .cursorJson(resumeCursorJson(rowsDone)).rowsDone(rowsDone).updatedAt(new Date()).build());
+            reportProgress(rowsDone);
+        } catch (RuntimeException checkpointFailure) {
+            failure.addSuppressed(checkpointFailure);
+            log.warn("Could not checkpoint the committed sequential prefix", checkpointFailure);
         }
     }
 
@@ -626,11 +663,16 @@ public final class ImportRowBatcher implements AutoCloseable {
         batchesSinceCheckpoint++;
         long rowsDone = durableWatermark() - 1;
         try {
-            if (journal != null && batchesSinceCheckpoint % journalProgressInterval == 0) {
-                journal.progress("IMPORTING", rowsDone);
+            if (journal != null && !defersRowDurabilityToCommit) {
+                if (batchesSinceCheckpoint % journalProgressInterval == 0) {
+                    journal.progress("IMPORTING", rowsDone);
+                }
             }
             reportProgress(rowsDone);
-            if (batchesSinceCheckpoint % checkpointInterval == 0) {
+            // A deferred import writes nothing durable about individual rows: its transaction is
+            // still open, so a rollback would discard the rows a watermark claims. The shard's
+            // completion is recorded by the manifest scheduler after the commit, not here.
+            if (!defersRowDurabilityToCommit && batchesSinceCheckpoint % checkpointInterval == 0) {
                 context.checkpoint(ResumeState.builder()
                         .shardNo(0)
                         .kind(RESUME_KIND_IMPORT)
@@ -639,7 +681,8 @@ public final class ImportRowBatcher implements AutoCloseable {
                         .updatedAt(new Date())
                         .build());
             }
-            if (journal != null && batchesSinceCheckpoint % snapshotInterval == 0) {
+            if (journal != null && !defersRowDurabilityToCommit
+                    && batchesSinceCheckpoint % snapshotInterval == 0) {
                 journal.snapshot(rowsDone);
             }
         } catch (TaskCancelledException cancellation) {
@@ -1065,8 +1108,9 @@ public final class ImportRowBatcher implements AutoCloseable {
             LAST_TUNING.set(new ImportTuningSnapshot(workerCount, submittedBatches, importedRows,
                     totalImportNanos, batchSizer.batchSize(),
                     gate == null ? 1 : gate.availablePermits(), peakInFlightBatches.get()));
-            if (failure.get() == null) {
-                // Tail checkpoint: after the final flush everything accepted is durable.
+            if (failure.get() == null && !defersRowDurabilityToCommit) {
+                // Tail checkpoint: after the final flush everything accepted is durable. A deferred
+                // import has not committed yet, so it must not claim any rows either.
                 try {
                     long rowsDone = durableWatermark() - 1;
                     context.checkpoint(ResumeState.builder()
@@ -1080,14 +1124,8 @@ public final class ImportRowBatcher implements AutoCloseable {
                     log.warn("Final import resume checkpoint failed", tailCheckpointFailure);
                 }
             }
-            if (journal != null) {
-                if (failure.get() == null) {
-                    journal.cleanup();
-                } else {
-                    journal.progress("FAILED", durableWatermark() - 1);
-                    journal.preserve();
-                }
-            }
+            ImportResumeJournalPolicy.apply(journal, defersRowDurabilityToCommit, failure.get() != null,
+                    durableWatermark() - 1);
             if (rejectWriter != null) {
                 try {
                     rejectWriter.flush();

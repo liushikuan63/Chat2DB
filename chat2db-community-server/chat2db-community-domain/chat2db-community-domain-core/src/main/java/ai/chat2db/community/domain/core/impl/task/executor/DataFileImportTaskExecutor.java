@@ -88,6 +88,9 @@ public class DataFileImportTaskExecutor implements TaskExecutor<ImportTaskSpec> 
                     && (TaskExecutionMode.isUltraFast(spec.getMode()) || scopedManifest || stagingRequested)) {
                 manifest = new CsvManifestPreparer(taskStorage).prepare(spec, context);
             }
+            if (manifest == null) {
+                requireManifestForStagingRequest(stagingRequested, manifest != null);
+            }
             if (manifest != null) {
                 if (!TaskFileFormat.CSV.name().equals(format)
                         || (!TaskExecutionMode.isUltraFast(spec.getMode()) && !scopedManifest
@@ -159,6 +162,19 @@ public class DataFileImportTaskExecutor implements TaskExecutor<ImportTaskSpec> 
         }
         existing.addSuppressed(next);
         return existing;
+    }
+
+    /**
+     * Staging options (rehearsal, full rollback, validation, finalization) are only honoured by the
+     * staging importer. If the requested features produced no manifest, running the plain strategy
+     * would import for real while the task reports that it only rehearsed the change, so the task
+     * fails instead of silently doing more than it was asked.
+     */
+    static void requireManifestForStagingRequest(boolean stagingRequested, boolean manifestPresent) {
+        if (stagingRequested && !manifestPresent) {
+            throw new TaskExecutionException(TaskErrorCode.IMPORT_FAILED.name(),
+                    "Advanced staging import options require an ultra-fast or multi-table CSV task");
+        }
     }
 
     static boolean stagingFeaturesRequested(ImportTaskSpec spec) {

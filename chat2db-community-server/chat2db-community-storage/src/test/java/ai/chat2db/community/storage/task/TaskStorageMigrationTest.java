@@ -1,5 +1,6 @@
 package ai.chat2db.community.storage.task;
 
+import ai.chat2db.community.domain.api.model.task.ResumeState;
 import ai.chat2db.community.domain.api.model.task.Task;
 import ai.chat2db.community.domain.api.model.task.ImportManifest;
 import ai.chat2db.community.domain.api.model.task.ImportManifestIntegrity;
@@ -235,6 +236,63 @@ class TaskStorageMigrationTest {
         }
     }
 
+    @Test
+    void replaysAPendingTransitionSoACompletedTaskStaysCompleted() {
+        FileTaskStorage file = new FileTaskStorage(baseDir.getAbsolutePath());
+        Long taskId = file.create(task("interrupted"), event(TaskEventCode.TASK_CREATED.name())).getId();
+        assertTrue(file.compareAndSetStatus(taskId, TaskStatus.PENDING.name(), TaskStatus.RUNNING.name(),
+                TaskStatusPatch.builder().progress(TaskConstants.STARTED_PROGRESS).stage("started").build(),
+                event(TaskEventCode.TASK_STARTED.name())));
+
+        // A process killed after the success event was appended but before the snapshot was
+        // rewritten leaves the transition journal behind; the snapshot still says RUNNING.
+        TaskEvent succeeded = event(TaskEventCode.TASK_SUCCEEDED.name());
+        succeeded.setTaskId(taskId);
+        succeeded.setEventId(4242L);
+        succeeded.setSequence(3L);
+        succeeded.setDetails(java.util.Map.of());
+        Task transitioning = file.get(taskId).orElseThrow();
+        transitioning.setStatus(TaskStatus.SUCCESS.name());
+        transitioning.setProgress(TaskConstants.COMPLETED_PROGRESS);
+        transitioning.setFinishedAt(new Date());
+        FileUtil.writeUtf8String(com.alibaba.fastjson2.JSON.toJSONString(
+                java.util.Map.of("task", transitioning, "event", succeeded)),
+                transitionFile(taskId));
+
+        assertEquals(1, new TaskStorageMigrator(database(), baseDir.getAbsolutePath()).migrateIfRequired());
+
+        H2TaskStorage migrated = new H2TaskStorage(database());
+        Task migratedTask = migrated.get(taskId).orElseThrow();
+        assertEquals(TaskStatus.SUCCESS.name(), migratedTask.getStatus(),
+                "a task whose success was already durable must not be imported as still running");
+        assertEquals(List.of(1L, 2L, 3L), sequences(migrated.listEvents(taskId, 0, 20)),
+                "the recovery replay must bring the success event across as well");
+    }
+
+    @Test
+    void carriesResumeCheckpointsAcrossSoTheTaskStaysResumable() {
+        FileTaskStorage file = new FileTaskStorage(baseDir.getAbsolutePath());
+        Long taskId = file.create(task("checkpointed"), event(TaskEventCode.TASK_CREATED.name())).getId();
+        file.saveResumeState(taskId, ResumeState.builder()
+                .shardNo(0).kind("IMPORT_WATERMARK").cursorJson("{\"watermark\":500}")
+                .rowsDone(500L).bytesDone(null).updatedAt(new Date()).build());
+        file.saveResumeState(taskId, ResumeState.builder()
+                .shardNo(3).kind("MANIFEST_RUNNING").cursorJson("{\"shard\":\"orders-3\"}")
+                .rowsDone(120L).bytesDone(4096L).updatedAt(new Date()).build());
+
+        assertEquals(1, new TaskStorageMigrator(database(), baseDir.getAbsolutePath()).migrateIfRequired());
+
+        H2TaskStorage migrated = new H2TaskStorage(database());
+        List<ResumeState> states = migrated.listResumeStates(taskId);
+        assertEquals(List.of(0, 3), states.stream().map(ResumeState::getShardNo).toList());
+        assertEquals(List.of("IMPORT_WATERMARK", "MANIFEST_RUNNING"),
+                states.stream().map(ResumeState::getKind).toList());
+        assertEquals(List.of(500L, 120L), states.stream().map(ResumeState::getRowsDone).toList());
+        assertEquals("{\"watermark\":500}", states.get(0).getCursorJson());
+        assertEquals(List.of(taskId), ids(migrated.listResumableTasks()),
+                "a checkpointed task must stay resumable after the migration");
+    }
+
     private Task task(String name) {
         return Task.builder()
                 .type("TABLE_DATA_EXPORT")
@@ -280,6 +338,10 @@ class TaskStorageMigrationTest {
 
     private File indexFile() {
         return new File(legacyDirectory(), FileTaskStorage.TASK_INDEX_NAME + ".json");
+    }
+
+    private File transitionFile(Long taskId) {
+        return new File(legacyDirectory(), taskId + "-transition.json");
     }
 
     private File legacyDirectory() {

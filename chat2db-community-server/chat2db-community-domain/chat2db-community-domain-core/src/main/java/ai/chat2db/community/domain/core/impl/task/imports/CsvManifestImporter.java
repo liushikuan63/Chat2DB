@@ -488,6 +488,13 @@ public final class CsvManifestImporter {
         @Override public void write(String content) { delegate.write(content); }
         @Override public List<ResumeState> resumeStates() { return List.of(); }
         @Override public void checkpoint(ResumeState state) { }
+
+        /**
+         * The shard owns one transaction that commits after the importer returns, so rows a batch
+         * already wrote are not durable while the import runs. Publishing a resume watermark here
+         * would make the automatic retry skip rows the rollback discarded.
+         */
+        @Override public boolean defersRowDurabilityToCommit() { return true; }
         @Override public void onStatementCreated(Statement statement) { delegate.onStatementCreated(statement); }
         @Override public void onStatementClosed(Statement statement) { delegate.onStatementClosed(statement); }
 
