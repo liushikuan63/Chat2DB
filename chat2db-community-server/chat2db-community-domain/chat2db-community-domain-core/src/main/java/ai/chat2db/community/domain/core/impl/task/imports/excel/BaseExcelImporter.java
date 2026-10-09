@@ -39,13 +39,17 @@ public abstract class BaseExcelImporter extends BaseImporter {
         spec.setExcelOptions(spec.getExcelOptions() == null
                 ? new ExcelOptions().validate()
                 : spec.getExcelOptions().validate());
+        ExcelOptions excelOptions = spec.getExcelOptions();
         try (NoModelDataListener listener = new NoModelDataListener(spec, context, columns,
                 Chat2DBContext.getDbMetaData().getValueProcessor())) {
             try {
                 EasyExcel.read(new File(spec.getSourceFile()), listener)
-                        .excelType(excelType).sheet().headRowNumber(1).doRead();
+                        .excelType(excelType)
+                        .sheet(excelOptions.getSheetIndex())
+                        .headRowNumber(excelOptions.getHasHeader() ? excelOptions.getHeaderRow() : 0)
+                        .doRead();
                 context.checkCancelled();
-                listener.finish();
+                listener.finish("Excel import finished");
             } catch (RuntimeException failure) {
                 if (listener.batcher != null) {
                     listener.batcher.abort(failure);
@@ -69,12 +73,15 @@ public abstract class BaseExcelImporter extends BaseImporter {
 
         private ImportColumnResolver.Resolution resolution;
 
-        private ImportRowBatcher batcher;
+        protected ImportRowBatcher batcher;
 
         private long rowNumber;
 
-        private NoModelDataListener(ImportTaskSpec spec, TaskExecutionContext taskContext,
+        private final long startedNanos;
+
+        protected NoModelDataListener(ImportTaskSpec spec, TaskExecutionContext taskContext,
                 List<TableColumn> columns, IValueProcessor valueProcessor) {
+            this.startedNanos = System.nanoTime();
             this.spec = spec;
             this.taskContext = taskContext;
             this.columns = columns;
@@ -115,14 +122,52 @@ public abstract class BaseExcelImporter extends BaseImporter {
             this.taskContext.checkCancelled();
         }
 
-        void finish() {
+        void finish(String summaryMessage) {
             if (batcher == null) {
                 return;
             }
             batcher.flush();
-            taskContext.logInfo("IMPORT_SUMMARY", "Excel import finished", Map.of(
+            taskContext.logInfo("IMPORT_SUMMARY", summaryMessage, Map.of(
                     "importedRows", batcher.importedRows(),
-                    "rejectedRows", batcher.rejectedRows()));
+                    "rejectedRows", batcher.rejectedRows(),
+                    "elapsedMillis", (System.nanoTime() - startedNanos) / 1_000_000L));
+        }
+
+        /** Resolves the columns and opens the batcher from a header row read outside EasyExcel. */
+        void acceptHead(Map<Integer, String> header) {
+            this.taskContext.checkCancelled();
+            int columnsCount = header.isEmpty() ? 0
+                    : java.util.Collections.max(header.keySet()) + 1;
+            List<String> headers = new ArrayList<>(columnsCount);
+            for (int index = 0; index < columnsCount; index++) {
+                headers.add(header.get(index));
+            }
+            resolution = ImportColumnResolver.resolveForSpec(columns, headers, spec);
+            reportResolution(taskContext, resolution);
+            ImportColumnResolver.validateForImport(columns, resolution, spec);
+            batcher = new ImportRowBatcher(spec, taskContext, resolution, valueProcessor);
+        }
+
+        /**
+         * Feeds one data row read outside EasyExcel.
+         *
+         * <p>The row is numbered by its position among the data rows, exactly like {@link #invoke},
+         * not by its line in the file. The number is the batcher's watermark unit: it drives resume,
+         * the progress message ("imported N rows") and the reject log, all of which mean "the Nth
+         * row of data". Passing the physical line number instead would make a file with a header
+         * report one row more than it imported.
+         */
+        void acceptRow(Map<Integer, String> row, int currentRow) {
+            this.taskContext.checkCancelled();
+            if (row == null || row.isEmpty() || batcher == null || resolution == null) {
+                return;
+            }
+            int width = resolution.matches().size();
+            List<String> values = new ArrayList<>(width);
+            for (int index = 0; index < width; index++) {
+                values.add(row.get(index));
+            }
+            batcher.accept(++rowNumber, values);
         }
 
         @Override

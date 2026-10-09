@@ -72,7 +72,7 @@ final class TaskRunner<S extends TaskSpec> implements Runnable {
             bindExecutionContext();
             taskExtensionManager.runGuarded(submission.extensionContext(), () -> {
                 try (Chat2DBContext.StatementGuardScope ignored =
-                        Chat2DBContext.bindStatementGuard(taskExtensionManager::beforeStatement)) {
+                        Chat2DBContext.bindStatementGuard(taskExtensionManager.captureStatementGuard())) {
                     taskExecutor.execute(submission.spec(), executionContext);
                 }
             });
@@ -166,7 +166,7 @@ final class TaskRunner<S extends TaskSpec> implements Runnable {
             }
             String primaryArtifactId = null;
             for (ArtifactDraft draft : drafts) {
-                String artifactId = artifactService.publish(draft);
+                String artifactId = publishWithRecoveryRecord(draft, TaskStage.FINALIZING.name());
                 published.add(artifactId);
                 if (primaryArtifactId == null || TaskArtifactRole.OUTPUT.equals(draft.getRole())) {
                     primaryArtifactId = artifactId;
@@ -301,7 +301,7 @@ final class TaskRunner<S extends TaskSpec> implements Runnable {
                     artifactService.deleteDraft(draft);
                     continue;
                 }
-                artifactId = artifactService.publish(draft);
+                artifactId = publishWithRecoveryRecord(draft, TaskStage.FAILED.name());
                 taskStorage.saveArtifact(submission.taskId(), TaskArtifact.builder()
                         .artifactId(artifactId)
                         .role(draft.getRole())
@@ -336,6 +336,18 @@ final class TaskRunner<S extends TaskSpec> implements Runnable {
 
     private boolean isFailureDiagnostic(ArtifactDraft draft) {
         return draft != null && TaskArtifactRole.isDiagnostic(draft.getRole());
+    }
+
+    private String publishWithRecoveryRecord(ArtifactDraft draft, String stage) {
+        return artifactService.publish(draft, artifactId -> taskStorage.appendEvent(TaskEvent.builder()
+                .taskId(submission.taskId())
+                .level(TaskEventLevel.INFO.name())
+                .code(TaskEventCode.ARTIFACT_PUBLICATION_STARTED.name())
+                .stage(stage)
+                .message("Saving task artifact")
+                .details(Map.of(TaskConstants.ARTIFACT_ID_DETAIL_KEY, artifactId,
+                        TaskConstants.ARTIFACT_ROLE_DETAIL_KEY, String.valueOf(draft.getRole())))
+                .build()));
     }
 
     private int diagnosticPriority(ArtifactDraft draft) {
