@@ -10,7 +10,9 @@ on:
 permissions:
   contents: read
   pull-requests: read
-if: github.event.pull_request.draft == false
+if: >-
+  github.event.pull_request.draft == false &&
+  (github.repository == 'OtterMind/Chat2DB' || vars.ENABLE_AI_AUTOMATION == 'true')
 concurrency:
   group: ai-pr-review-${{ github.event.pull_request.number }}
   cancel-in-progress: true
