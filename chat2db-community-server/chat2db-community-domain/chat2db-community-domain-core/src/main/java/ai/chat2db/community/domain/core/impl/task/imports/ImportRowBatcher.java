@@ -238,14 +238,18 @@ public final class ImportRowBatcher implements AutoCloseable {
         this.valueProcessor = valueProcessor;
         this.sqlBuilder = Chat2DBContext.getSqlBuilder();
         this.connectInfo = Chat2DBContext.getConnectInfo();
-        this.standardMode = !TaskExecutionMode.isUltraFast(spec.getMode());
-        this.sqlExecutor = new ImportSqlExecutor(context);
+        this.standardMode = !TaskExecutionMode.isUltraFast(spec.getMode())
+                || "XLS".equalsIgnoreCase(spec.getFormat()) || "XLSX".equalsIgnoreCase(spec.getFormat());
         this.sourceIdentity = sourceIdentity(spec);
         this.requestContext = ContextUtils.queryContext();
         this.statementGuard = Chat2DBContext.captureStatementGuard();
         this.loggingContext = MDC.getCopyOfContextMap();
         this.resumeBelowRow = resolveResumeBelowRow(spec, context);
         this.defersRowDurabilityToCommit = context.defersRowDurabilityToCommit();
+        // Ordinary abort-on-error imports retain their historical committed prefix. Shards and
+        // SKIP replay need a transactional batch so rolled-back rows can be retried together.
+        this.sqlExecutor = new ImportSqlExecutor(context,
+                !standardMode || defersRowDurabilityToCommit || isSkipMode());
         if (resumeBelowRow > 0) {
             log.info("Import resume: the first {} rows are durable from the interrupted run; "
                     + "they will be skipped", resumeBelowRow);
@@ -438,12 +442,14 @@ public final class ImportRowBatcher implements AutoCloseable {
                 importedCount.add(rows);
                 fullyHandled = true;
             } catch (TaskCancelledException cancellation) {
+                recordSequentialPrefix(batch, cancellation);
                 throw cancellation;
             } catch (RuntimeException batchFailure) {
                 context.logError("IMPORT_BATCH_FAILED", "Could not import batch", Map.of(
                         "statementCount", rows,
                         "message", StringUtils.defaultString(batchFailure.getMessage())));
                 if (!isSkipMode()) {
+                    recordSequentialPrefix(batch, batchFailure);
                     throw batchFailure;
                 }
                 // In SKIP mode every row ends handled (imported or recorded in the reject file),
@@ -477,6 +483,29 @@ public final class ImportRowBatcher implements AutoCloseable {
                 }
                 batchCompleted();
             }
+        }
+    }
+
+    /** Retains the committed prefix without letting a later resume replay those rows. */
+    private void recordSequentialPrefix(PendingBatch batch, RuntimeException failure) {
+        int completed = Math.min(batch.sqls().size(), sqlExecutor.completedSequentialStatements());
+        if (completed == 0 || defersRowDurabilityToCommit) {
+            return;
+        }
+        importedCount.add(completed);
+        inFlightFirstRows.put(batch.seq(), batch.rowNumbers().get(completed - 1) + 1);
+        long rowsDone = durableWatermark() - 1;
+        if (journal != null) {
+            journal.progress("IMPORTING", rowsDone);
+        }
+        try {
+            // A failure is not a cadence boundary: force this watermark even for a short prefix.
+            context.checkpoint(ResumeState.builder().shardNo(0).kind(RESUME_KIND_IMPORT)
+                    .cursorJson(resumeCursorJson(rowsDone)).rowsDone(rowsDone).updatedAt(new Date()).build());
+            reportProgress(rowsDone);
+        } catch (RuntimeException checkpointFailure) {
+            failure.addSuppressed(checkpointFailure);
+            log.warn("Could not checkpoint the committed sequential prefix", checkpointFailure);
         }
     }
 

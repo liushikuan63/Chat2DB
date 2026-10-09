@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { ImportExportFileType, ImportExportTaskType, ImportExportType } from '@/constants/importExport';
-import { SQL_EXPORTER_PROFILES, type ImportExportDataBoundInfo } from '@/typings/importExport';
-import { buildTaskParams, initialFileType, type ImportExportFormValue } from './taskParams';
+import { SQL_EXPORTER_PROFILES, type ImportExecutionMode, type ImportExportDataBoundInfo } from '@/typings/importExport';
+import { buildCsvImportOptions, buildTaskParams, initialFileType, type ImportExportFormValue } from './taskParams';
 
 const checkpointableFormats = [
   ImportExportFileType.CSV,
@@ -14,11 +14,15 @@ const baseForm: ImportExportFormValue = {
   containsHeader: true,
 };
 
-function build(boundInfo: ImportExportDataBoundInfo, overrides: Partial<ImportExportFormValue> = {}) {
+function build(
+  boundInfo: ImportExportDataBoundInfo,
+  overrides: Partial<ImportExportFormValue> = {},
+  mode: ImportExecutionMode = 'ULTRA_FAST',
+) {
   return buildTaskParams({
     boundInfo,
     formValue: { ...baseForm, ...overrides },
-    mode: 'ULTRA_FAST',
+    mode,
     sourceFile: 'C:\\imports\\dump.sql',
     exportLocation: 'C:\\exports',
     desktop: true,
@@ -42,7 +46,7 @@ assert.deepEqual(build(tableExport, { checkpointRows: 10000 }), {
   databaseName: 'app',
   schemaName: 'public',
   format: ImportExportFileType.CSV,
-  mode: 'ULTRA_FAST',
+  mode: 'STANDARD',
   taskType: ImportExportTaskType.TABLE_DATA_EXPORT,
   tableNames: ['orders'],
   containsHeader: true,
@@ -66,7 +70,7 @@ assert.deepEqual(build(schemaExport, { exportType: ImportExportFileType.SQL, com
   databaseName: 'app',
   schemaName: 'reporting',
   format: ImportExportFileType.SQL,
-  mode: 'ULTRA_FAST',
+  mode: 'STANDARD',
   taskType: ImportExportTaskType.SQL_EXPORT,
   tableNames: undefined,
   scope: 'ALL',
@@ -163,6 +167,34 @@ assert.deepEqual('options' in mappedImport ? mappedImport.options : undefined, {
   maxErrors: 5,
   columnMappings: [{ sourceColumn: 'order_id', targetColumn: 'id' }],
 });
+
+const selectedCsvOptions: ImportExportFormValue = {
+  ...baseForm,
+  charset: 'UTF-16LE',
+  delimiter: ';',
+  quoteChar: "'",
+  skipRows: 2,
+  nullString: 'NULL',
+  onError: 'SKIP',
+  maxErrors: 5,
+};
+const previewOptions = buildCsvImportOptions(selectedCsvOptions);
+const configuredCsvImport = build(tableImport, selectedCsvOptions, 'STANDARD');
+assert.equal(configuredCsvImport.mode, 'STANDARD');
+assert.deepEqual(previewOptions, {
+  charset: 'UTF-16LE',
+  delimiter: ';',
+  quoteChar: "'",
+  skipRows: 2,
+  nullString: 'NULL',
+  onError: 'SKIP',
+  maxErrors: 5,
+});
+assert.deepEqual(
+  'options' in configuredCsvImport ? configuredCsvImport.options : undefined,
+  previewOptions,
+  'CSV preview and execution must receive the same selected parser and row handling options',
+);
 
 const confirmedParallelImport = buildTaskParams({
   boundInfo: tableImport,

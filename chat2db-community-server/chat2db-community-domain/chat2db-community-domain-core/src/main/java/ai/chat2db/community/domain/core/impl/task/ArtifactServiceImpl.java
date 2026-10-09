@@ -81,6 +81,11 @@ public class ArtifactServiceImpl implements ArtifactService {
 
     @Override
     public String publish(ArtifactDraft draft) {
+        return publish(draft, ignored -> { });
+    }
+
+    @Override
+    public String publish(ArtifactDraft draft, Consumer<String> onTargetCreated) {
         if (draft == null) {
             throw new IllegalArgumentException("Artifact draft is incomplete");
         }
@@ -97,7 +102,7 @@ public class ArtifactServiceImpl implements ArtifactService {
             // a name that appeared since the reservation is never overwritten: the draft is moved to
             // a fresh name instead. A plain move would either clobber that file or fail depending on
             // the platform.
-            File target = claimTarget(draft);
+            File target = claimTarget(draft, onTargetCreated);
             return target.getAbsolutePath();
         } catch (IOException e) {
             throw new IllegalStateException("Could not publish artifact", e);
@@ -110,15 +115,30 @@ public class ArtifactServiceImpl implements ArtifactService {
      * Moves the draft onto its target, choosing a new name whenever the current one is taken.
      * Returns the published path.
      */
-    private File claimTarget(ArtifactDraft draft) throws IOException {
+    private File claimTarget(ArtifactDraft draft, Consumer<String> onTargetCreated) throws IOException {
         Path source = draft.getTemporaryFile().toPath();
         File requested = draft.getTargetFile().getAbsoluteFile();
         File candidate = requested;
         for (int attempt = 0; attempt < 1000; attempt++) {
             if (claimEmptyFile(candidate.toPath())) {
-                moveReplacing(source, candidate.toPath());
-                return candidate;
+                try {
+                    // This path belongs to the task now. Persist its actual name before moving any
+                    // contents, including when a collision changed the originally reserved name.
+                    onTargetCreated.accept(candidate.getAbsolutePath());
+                    moveReplacing(source, candidate.toPath());
+                    return candidate;
+                } catch (IOException | RuntimeException | Error failure) {
+                    try {
+                        Files.deleteIfExists(candidate.toPath());
+                    } catch (IOException cleanupFailure) {
+                        failure.addSuppressed(cleanupFailure);
+                    }
+                    throw failure;
+                } finally {
+                    reservedTargets.remove(candidate.toPath().toAbsolutePath().normalize());
+                }
             }
+            reservedTargets.remove(candidate.toPath().toAbsolutePath().normalize());
             candidate = reserveAvailableTarget(requested.getParentFile(), requested.getName());
         }
         throw new IOException("Could not claim an artifact name after 1000 attempts: " + requested);
@@ -136,23 +156,6 @@ public class ArtifactServiceImpl implements ArtifactService {
                 throw new IllegalStateException("Could not claim artifact name " + target, e);
             }
             return false;
-        }
-    }
-
-    /**
-     * The move above is atomic, so the destination only exists once the whole file is there;
-     * notifying straight after it is therefore as early as the contract allows, and a listener
-     * failure still leaves the published file to be reclaimed.
-     */
-    @Override
-    public String publish(ArtifactDraft draft, Consumer<String> onTargetCreated) {
-        String artifactId = publish(draft);
-        try {
-            onTargetCreated.accept(artifactId);
-            return artifactId;
-        } catch (RuntimeException | Error e) {
-            deletePublished(artifactId);
-            throw e;
         }
     }
 

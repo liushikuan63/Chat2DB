@@ -98,6 +98,123 @@ class CsvImportPipelineTest {
     }
 
     @Test
+    void ordinaryModesPreserveSequentialWritesBeforeFailure() throws Exception {
+        for (String mode : java.util.Arrays.asList(null, "STANDARD", "unknown")) {
+            Path source = tempDirectory.resolve("prefix-" + mode + ".csv");
+            Files.writeString(source, "ID,NAME\n1,ok\n1,duplicate\n2,later\n");
+            storage = new InMemoryTaskStorage();
+            try (Statement statement = connection.createStatement()) {
+                statement.execute("DELETE FROM TARGET_ROWS");
+            }
+            ImportTaskSpec spec = ImportTaskSpec.builder()
+                    .taskType("DATA_FILE_IMPORT").sourceFile(source.toString()).format("CSV").mode(mode)
+                    .target(TaskTargetSnapshot.builder().dataSourceId(1L).tableName("TARGET_ROWS").build())
+                    .build();
+            TaskExecutionContextImpl context = createContext(spec);
+
+            org.junit.jupiter.api.Assertions.assertThrows(
+                    ai.chat2db.community.domain.api.model.task.TaskExecutionException.class,
+                    () -> new CSVImporter().run(spec, context));
+
+            assertImportedPrefix();
+            assertTrue(connection.getAutoCommit());
+        }
+    }
+
+    @Test
+    void standardExcelPreservesSequentialWritesBeforeFailure() throws Exception {
+        Path source = tempDirectory.resolve("prefix.xlsx");
+        com.alibaba.excel.EasyExcel.write(source.toFile())
+                .head(List.of(List.of("ID"), List.of("NAME"))).sheet()
+                .doWrite(List.of(List.of(1, "ok"), List.of(1, "duplicate"), List.of(2, "later")));
+        ImportTaskSpec spec = ImportTaskSpec.builder()
+                .taskType("DATA_FILE_IMPORT").sourceFile(source.toString()).format("XLSX").mode("STANDARD")
+                .target(TaskTargetSnapshot.builder().dataSourceId(1L).tableName("TARGET_ROWS").build())
+                .build();
+        TaskExecutionContextImpl context = createContext(spec);
+
+        org.junit.jupiter.api.Assertions.assertThrows(
+                ai.chat2db.community.domain.api.model.task.TaskExecutionException.class,
+                () -> new ai.chat2db.community.domain.core.impl.task.imports.excel.XLSXImporter()
+                        .run(spec, context));
+
+        assertImportedPrefix();
+    }
+
+    private TaskExecutionContextImpl createContext(ImportTaskSpec spec) {
+        Long taskId = storage.create(Task.builder().type("DATA_FILE_IMPORT").target(spec.getTarget()).build(),
+                TaskEvent.builder().code("TASK_CREATED").build()).getId();
+        return new TaskExecutionContextImpl(taskId, new RunningTask(taskId), storage, new ArtifactServiceImpl());
+    }
+
+    private void assertImportedPrefix() throws Exception {
+        try (Statement statement = connection.createStatement();
+             ResultSet rows = statement.executeQuery("SELECT ID FROM TARGET_ROWS ORDER BY ID")) {
+            assertTrue(rows.next(), "the successful prefix must remain committed after the duplicate row fails");
+            assertEquals(1, rows.getInt(1));
+            org.junit.jupiter.api.Assertions.assertFalse(rows.next(), "rows after the failed row must not run");
+        }
+    }
+
+    @Test
+    void standardWizardOptionsControlTheRowsAndValuesActuallyImported() throws Exception {
+        Path source = tempDirectory.resolve("wizard.csv");
+        Files.writeString(source, "ID;NAME\n99;skip\n1;'kept'\n2;NULL\n", StandardCharsets.UTF_16LE);
+        ImportTaskSpec spec = ImportTaskSpec.builder()
+                .taskType("DATA_FILE_IMPORT").sourceFile(source.toString()).format("CSV").mode("STANDARD")
+                .target(TaskTargetSnapshot.builder().dataSourceId(1L).tableName("TARGET_ROWS").build())
+                .options(ImportOptions.builder().charset("UTF-16LE").delimiter(";").quoteChar("'")
+                        .skipRows(1).nullString("NULL").build())
+                .build();
+        Long taskId = storage.create(Task.builder().type("DATA_FILE_IMPORT").target(spec.getTarget()).build(),
+                TaskEvent.builder().code("TASK_CREATED").build()).getId();
+        TaskExecutionContextImpl context = new TaskExecutionContextImpl(taskId, new RunningTask(taskId),
+                storage, new ArtifactServiceImpl());
+
+        new CSVImporter().run(spec, context);
+
+        try (Statement statement = connection.createStatement();
+             ResultSet rows = statement.executeQuery("SELECT ID, NAME FROM TARGET_ROWS ORDER BY ID")) {
+            assertTrue(rows.next());
+            assertEquals(1, rows.getInt(1));
+            assertEquals("kept", rows.getString(2));
+            assertTrue(rows.next());
+            assertEquals(2, rows.getInt(1));
+            org.junit.jupiter.api.Assertions.assertNull(rows.getString(2));
+            org.junit.jupiter.api.Assertions.assertFalse(rows.next());
+        }
+    }
+
+    @Test
+    void explicitCsvSettingsTakePrecedenceOverConflictingWizardOptions() throws Exception {
+        Path source = tempDirectory.resolve("legacy.csv");
+        Files.writeString(source, "ID;NAME\n1;NULL\n", StandardCharsets.UTF_8);
+        var csvOptions = ai.chat2db.community.domain.api.model.task.CsvOptions.defaults();
+        csvOptions.setDelimiter(";");
+        csvOptions.setEmptyAsNull(false);
+        ImportTaskSpec spec = ImportTaskSpec.builder()
+                .taskType("DATA_FILE_IMPORT").sourceFile(source.toString()).format("CSV").mode("STANDARD")
+                .target(TaskTargetSnapshot.builder().dataSourceId(1L).tableName("TARGET_ROWS").build())
+                .csvOptions(csvOptions)
+                .options(ImportOptions.builder().charset("UTF-16LE").delimiter("|")
+                        .skipRows(99).nullString("OTHER").build())
+                .build();
+        Long taskId = storage.create(Task.builder().type("DATA_FILE_IMPORT").target(spec.getTarget()).build(),
+                TaskEvent.builder().code("TASK_CREATED").build()).getId();
+
+        new CSVImporter().run(spec, new TaskExecutionContextImpl(taskId, new RunningTask(taskId),
+                storage, new ArtifactServiceImpl()));
+
+        try (Statement statement = connection.createStatement();
+             ResultSet rows = statement.executeQuery("SELECT ID, NAME FROM TARGET_ROWS")) {
+            assertTrue(rows.next());
+            assertEquals(1, rows.getInt(1));
+            assertEquals("NULL", rows.getString(2));
+            org.junit.jupiter.api.Assertions.assertFalse(rows.next());
+        }
+    }
+
+    @Test
     void skipsBadRowsIntoRejectArtifactAndMapsColumnsExplicitly() throws Exception {
         Path csv = tempDirectory.resolve("input.csv");
         Files.writeString(csv, "ROW_ID,ROW_NAME,EXTRA\n1,ok,ignored\n2,this-value-is-too-long,x\n",

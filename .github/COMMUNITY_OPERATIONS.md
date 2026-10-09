@@ -21,6 +21,29 @@ Each concern has one owner. Do not duplicate status in labels or comments.
 | Implementation and verification | Linked pull request |
 | User delivery | GitHub Release |
 
+## Automation In Forks
+
+Community CI and CodeQL run in forks. The official repository also enables the
+Community operations integrations by default. Forks must explicitly enable
+each integration with a repository Actions variable set to the string `true`:
+
+| Integration | Repository variable | Required configuration |
+| --- | --- | --- |
+| QQ notifications | `ENABLE_QQ_NOTIFICATIONS` | `QQ_RELAY_URL` and `QQ_RELAY_TOKEN` secrets for the fork's relay |
+| Community Project sync | `ENABLE_COMMUNITY_PROJECT_SYNC` | `ACCESS_TOKEN` secret and a reviewed Project target |
+| AI issue and PR automation | `ENABLE_AI_AUTOMATION` | The API and model secrets required by the AI workflow |
+| Dependency review | `ENABLE_DEPENDENCY_REVIEW` | Dependency graph and dependency review support enabled for the repository |
+
+When these variables are unset, the integration jobs are skipped in forks.
+The QQ manual workflow can still run with `dry_run: true` to inspect formatting
+without configuring a relay or sending a notification. A manual send requires
+the QQ integration to be enabled and configured.
+
+Project sync and the QQ delivery workflows execute trusted default-branch
+code. Their guards must reach the fork's default branch before they affect
+existing PR events. AI workflow source changes must be compiled with `gh aw
+compile` and include the matching generated `.lock.yml` files.
+
 ## Ownership And Response Targets
 
 The current primary Product, Triage, Review, and Release owner is

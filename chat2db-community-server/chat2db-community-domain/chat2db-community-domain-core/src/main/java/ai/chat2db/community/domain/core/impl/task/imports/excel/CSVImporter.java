@@ -5,6 +5,7 @@ import ai.chat2db.community.domain.api.model.task.CsvOptions;
 import ai.chat2db.community.domain.api.model.task.ImportTaskSpec;
 import ai.chat2db.community.domain.api.service.task.TaskExecutionContext;
 import ai.chat2db.community.domain.core.impl.task.imports.IImportStrategy;
+import ai.chat2db.community.domain.core.impl.task.imports.ImportFileProbe;
 import ai.chat2db.community.domain.core.impl.task.imports.reader.CsvImportReader;
 import ai.chat2db.community.domain.core.impl.task.imports.reader.SourceColumnName;
 import ai.chat2db.spi.sql.Chat2DBContext;
@@ -29,8 +30,7 @@ public class CSVImporter extends BaseExcelImporter implements IImportStrategy {
     @Override
     protected void doImportData(ImportTaskSpec spec, TaskExecutionContext context,
             List<TableColumn> columns) {
-        CsvOptions options = (spec.getCsvOptions() == null ? CsvOptions.defaults() : spec.getCsvOptions())
-                .validate();
+        CsvOptions options = ImportFileProbe.effectiveCsvOptions(spec);
         spec.setCsvOptions(options);
         try (NoModelDataListener listener = new NoModelDataListener(spec, context, columns,
                 Chat2DBContext.getDbMetaData().getValueProcessor())) {
@@ -49,7 +49,7 @@ public class CSVImporter extends BaseExcelImporter implements IImportStrategy {
     }
 
     /** Highest 1-based source column an explicit mapping names, so a synthetic header covers it. */
-    static int mappedSourceColumnCount(ImportTaskSpec spec) {
+    public static int mappedSourceColumnCount(ImportTaskSpec spec) {
         if (spec.getColumnMappings() == null) {
             return 0;
         }

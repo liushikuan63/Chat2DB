@@ -21,7 +21,7 @@ import { IImportPreview, ImportExecutionMode, SQL_EXPORTER_PROFILES } from '@/ty
 import { isDesktop } from '@/utils/env';
 import jcefApi from '@/jcef';
 import { CircleHelp } from 'lucide-react';
-import { buildTaskParams, initialFileType, type ImportExportFormValue } from './taskParams';
+import { buildCsvImportOptions, buildTaskParams, initialFileType, type ImportExportFormValue } from './taskParams';
 import sqlService from '@/service/sql';
 import { stageSelectedImportFile } from '../ImportMappingContent/fileStaging';
 import { createStagedFileOwnership } from '../ImportMappingContent/stagedFileOwnership';
@@ -212,11 +212,7 @@ const ImportExportFile = forwardRef((props: IProps, ref: ForwardedRef<ImportExpo
         confirmedNoStrongRelations,
         options:
           formValue.exportType === ImportExportFileType.CSV
-            ? {
-                charset: formValue.charset || undefined,
-                delimiter: formValue.delimiter || undefined,
-                quoteChar: formValue.quoteChar || undefined,
-              }
+            ? buildCsvImportOptions(formValue)
             : undefined,
       })
       .then((preview) => {
@@ -240,6 +236,10 @@ const ImportExportFile = forwardRef((props: IProps, ref: ForwardedRef<ImportExpo
     formValue.charset,
     formValue.delimiter,
     formValue.quoteChar,
+    formValue.skipRows,
+    formValue.nullString,
+    formValue.onError,
+    formValue.maxErrors,
     mode,
     confirmedNoStrongRelations,
     importExportDataBoundInfo,
@@ -340,7 +340,7 @@ const ImportExportFile = forwardRef((props: IProps, ref: ForwardedRef<ImportExpo
       setColumnMappings({});
       setIsReady?.(false);
     }
-    if (['charset', 'delimiter', 'quoteChar'].some((key) => key in changedValues)) {
+    if (['charset', 'delimiter', 'quoteChar', 'skipRows', 'nullString', 'onError', 'maxErrors'].some((key) => key in changedValues)) {
       setImportPreview(null);
       setIsReady?.(false);
     }
@@ -562,20 +562,22 @@ const ImportExportFile = forwardRef((props: IProps, ref: ForwardedRef<ImportExpo
       >
         <Input autoComplete="off" disabled />
       </Form.Item>
-      <Form.Item className={styles.fullWidth} label={i18n('workspace.importExport.ultraMode')}>
-        <div className={styles.modeControl}>
-          <Switch checked={mode === 'ULTRA_FAST'} onChange={handleModeToggle} />
-          <Tooltip title={ultraModeTooltip} mouseEnterDelay={0.2} styles={{ root: { maxWidth: 440 } }}>
-            <button
-              aria-label={i18n('workspace.importExport.ultraModeHint')}
-              className={styles.modeHelpButton}
-              type="button"
-            >
-              <CircleHelp aria-hidden size={16} />
-            </button>
-          </Tooltip>
-        </div>
-      </Form.Item>
+      {isImport && (
+        <Form.Item className={styles.fullWidth} label={i18n('workspace.importExport.ultraMode')}>
+          <div className={styles.modeControl}>
+            <Switch checked={mode === 'ULTRA_FAST'} onChange={handleModeToggle} />
+            <Tooltip title={ultraModeTooltip} mouseEnterDelay={0.2} styles={{ root: { maxWidth: 440 } }}>
+              <button
+                aria-label={i18n('workspace.importExport.ultraModeHint')}
+                className={styles.modeHelpButton}
+                type="button"
+              >
+                <CircleHelp aria-hidden size={16} />
+              </button>
+            </Tooltip>
+          </div>
+        </Form.Item>
+      )}
       {isImport && mode === 'ULTRA_FAST' && (
         <div className={styles.admissionPanel}>
           <Alert

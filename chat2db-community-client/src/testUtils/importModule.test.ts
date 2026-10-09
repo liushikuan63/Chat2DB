@@ -14,12 +14,23 @@ async function main() {
   globalObj.__ENV__ = 'test';
   globalObj.window = {};
 
+  if (typeof globalThis.navigator === 'undefined') {
+    Object.defineProperty(globalThis, 'navigator', {
+      value: { userAgent: 'Mac' },
+      configurable: true,
+    });
+  }
+
   const esm = await importModule<ShortcutModule>(() => import('../constants/shortcut'));
   assert.equal(typeof esm.ShortcutAction, 'object', 'named exports must be readable');
   assert.equal(
     esm.DEFAULT_SHORTCUT_CONFIG[esm.ShortcutAction.SqlToggleLineComment].action,
     esm.ShortcutAction.SqlToggleLineComment,
   );
+
+  const esmShape = { answer: 42, default: { answer: 0 } };
+  const named = await importModule<{ answer: number }>(() => Promise.resolve(esmShape));
+  assert.equal(named.answer, 42, 'an ESM namespace must prefer its named exports over default');
 
   // The shape tsx produces for a transpiled .ts module: no hoisted named exports, the real
   // exports live on `default`.

@@ -21,6 +21,10 @@ public final class ImportSqlExecutor {
 
     private final TaskExecutionContext context;
 
+    private final boolean batchInserts;
+
+    private int completedSequentialStatements;
+
     /**
      * Script-level transaction state. A script that issued {@code BEGIN} owns the transaction, so
      * insert batches must not commit behind its back.
@@ -31,7 +35,12 @@ public final class ImportSqlExecutor {
     private final AtomicInteger batchSequence = new AtomicInteger();
 
     public ImportSqlExecutor(TaskExecutionContext context) {
+        this(context, true);
+    }
+
+    public ImportSqlExecutor(TaskExecutionContext context, boolean batchInserts) {
         this.context = context;
+        this.batchInserts = batchInserts;
     }
 
     /**
@@ -48,6 +57,7 @@ public final class ImportSqlExecutor {
     }
 
     public void executeBatch(List<String> sqls) {
+        completedSequentialStatements = 0;
         if (CollectionUtils.isEmpty(sqls)) {
             return;
         }
@@ -61,7 +71,7 @@ public final class ImportSqlExecutor {
                     continue;
                 }
                 statementCount++;
-                if (sql.trim().toUpperCase().startsWith("INSERT")) {
+                if (batchInserts && sql.trim().toUpperCase().startsWith("INSERT")) {
                     inserts.add(sql);
                     continue;
                 }
@@ -95,6 +105,11 @@ public final class ImportSqlExecutor {
         } catch (Exception e) {
             throw importFailure(e);
         }
+    }
+
+    /** Successful prefix of the last sequential batch; transactional batches always return zero. */
+    public int completedSequentialStatements() {
+        return completedSequentialStatements;
     }
 
     static TaskExecutionException importFailure(Exception error) {
@@ -152,6 +167,9 @@ public final class ImportSqlExecutor {
         context.checkCancelled();
         DefaultSQLExecutor.getInstance().execute(
                 Chat2DBContext.getConnection(), sql, context, context::checkCancelled);
+        if (!batchInserts && Chat2DBContext.getConnection().getAutoCommit()) {
+            completedSequentialStatements++;
+        }
         context.checkCancelled();
         observeExecutedStatement(sql);
     }

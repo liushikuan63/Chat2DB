@@ -33,9 +33,10 @@ import ai.chat2db.community.domain.core.impl.task.imports.ImportFileProbe;
 import ai.chat2db.community.domain.core.impl.task.imports.ImportParallelAdmission;
 import ai.chat2db.community.domain.core.impl.task.imports.ImportTaskSourceSupport;
 import ai.chat2db.community.domain.core.impl.task.imports.excel.ImportPreviewListener;
+import ai.chat2db.community.domain.core.impl.task.imports.reader.CsvImportReader;
+import ai.chat2db.community.domain.core.impl.task.imports.excel.CSVImporter;
 import com.alibaba.excel.EasyExcel;
 import com.alibaba.excel.support.ExcelTypeEnum;
-import org.apache.commons.csv.CSVFormat;
 import ai.chat2db.community.tools.exception.BusinessException;
 import ai.chat2db.community.tools.exception.DataNotFoundException;
 import ai.chat2db.community.tools.model.Context;
@@ -200,21 +201,14 @@ public class TaskServiceImpl implements TaskService {
 
     private ImportPreview previewCsv(java.io.File source, ImportTaskSpec spec, List<TableColumn> tableColumns,
             ImportResourceSnapshot resources) {
-        try {
-            java.nio.charset.Charset charset = ImportFileProbe.effectiveCharset(source,
-                    spec.getOptions() == null ? null : spec.getOptions().getCharset());
-            char quote = ImportFileProbe.quoteChar(
-                    spec.getOptions() == null ? null : spec.getOptions().getQuoteChar());
-            char delimiter = ImportFileProbe.delimiterChar(
-                    spec.getOptions() == null ? null : spec.getOptions().getDelimiter(), charset, source);
-            CSVFormat format = ImportFileProbe.csvFormat(delimiter, quote);
-            List<List<String>> rows = ImportFileProbe.readSample(source, charset, format,
-                    ImportFileProbe.sampleRows());
-            return buildPreview(rows, tableColumns, spec, charset.name(), String.valueOf(delimiter),
-                    resources);
-        } catch (java.io.IOException e) {
-            throw new BusinessException("task.import.preview.failed", null, e);
-        }
+        var options = ImportFileProbe.effectiveCsvOptions(spec);
+        String nullString = spec.getOptions() == null ? null : spec.getOptions().getNullString();
+        List<List<String>> rows = new ArrayList<>();
+        CsvImportReader.read(source, options, ImportFileProbe.sampleRows(), CSVImporter.mappedSourceColumnCount(spec),
+                header -> rows.add(new ArrayList<>(header.values())),
+                (row, number) -> rows.add(new ArrayList<>(ImportFileProbe.normalizeNullLiteral(row, nullString)
+                        .values())), () -> { });
+        return buildPreview(rows, tableColumns, spec, options.getEncoding(), options.getDelimiter(), resources);
     }
 
     private ImportPreview previewExcel(java.io.File source, ImportTaskSpec spec, List<TableColumn> tableColumns,
