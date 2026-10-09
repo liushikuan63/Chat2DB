@@ -90,16 +90,30 @@ final class RestartCommandFactory {
         );
     }
 
+    /**
+     * Finds the {@code .app} bundle that owns a macOS launcher.
+     *
+     * <p>The launcher is a POSIX path by contract, so it is split as text. Using the host {@code
+     * Path} API would resolve a macOS path against the current platform's rules — on Windows
+     * {@code /Applications/X.app} becomes {@code D:\Applications\X.app} — and the restart command
+     * would carry a path that does not exist on the machine that runs it.
+     */
     private static String findMacAppBundle(String launcherPath) {
-        Path current = Path.of(launcherPath).toAbsolutePath();
-        while (current != null) {
-            Path fileName = current.getFileName();
-            if (fileName != null && fileName.toString().endsWith(".app")) {
-                return current.toString();
-            }
-            current = current.getParent();
+        if (launcherPath == null || launcherPath.isBlank()) {
+            return null;
         }
-        return null;
+        String current = launcherPath;
+        while (true) {
+            int separator = current.lastIndexOf('/');
+            String fileName = separator < 0 ? current : current.substring(separator + 1);
+            if (fileName.endsWith(".app")) {
+                return current;
+            }
+            if (separator < 0) {
+                return null;
+            }
+            current = current.substring(0, separator);
+        }
     }
 
     private static String powerShellLiteral(String value) {

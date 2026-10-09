@@ -8,6 +8,7 @@ on:
 permissions:
   contents: read
   issues: read
+if: github.repository == 'OtterMind/Chat2DB' || vars.ENABLE_AI_AUTOMATION == 'true'
 engine:
   id: codex
   version: "0.144.6"

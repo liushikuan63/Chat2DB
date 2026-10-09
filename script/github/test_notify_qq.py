@@ -490,11 +490,12 @@ class RelayClientTest(unittest.TestCase):
         self.assertIn("invalid relay token", str(decoded))
 
     def test_manual_dry_run_does_not_require_secrets(self):
-        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8") as event_file:
-            json.dump({"inputs": {"message": "dry run"}}, event_file)
-            event_file.flush()
+        with tempfile.TemporaryDirectory() as directory:
+            event_path = os.path.join(directory, "event.json")
+            with open(event_path, "w", encoding="utf-8") as event_file:
+                json.dump({"inputs": {"message": "dry run"}}, event_file)
             environment = {
-                "GITHUB_EVENT_PATH": event_file.name,
+                "GITHUB_EVENT_PATH": event_path,
                 "GITHUB_EVENT_NAME": "workflow_dispatch",
                 "GITHUB_REPOSITORY": "OtterMind/Chat2DB",
                 "GITHUB_ACTOR": "maintainer",
