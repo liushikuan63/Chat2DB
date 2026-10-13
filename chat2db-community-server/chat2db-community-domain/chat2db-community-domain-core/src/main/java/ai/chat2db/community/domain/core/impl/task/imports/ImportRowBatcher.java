@@ -44,6 +44,7 @@ import java.sql.SQLNonTransientConnectionException;
 import java.sql.SQLRecoverableException;
 import java.sql.SQLTransientConnectionException;
 import java.sql.Connection;
+import java.sql.Savepoint;
 import java.util.ArrayList;
 import java.util.Date;
 import java.util.HashMap;
@@ -451,7 +452,7 @@ public final class ImportRowBatcher implements AutoCloseable {
         RuntimeException failureToReport = null;
         try {
             try {
-                sqlExecutor.executeBatch(batch.sqls());
+                executeReplaySafe(batch.sqls());
                 importedCount.add(rows);
                 fullyHandled = true;
             } catch (TaskCancelledException cancellation) {
@@ -461,7 +462,7 @@ public final class ImportRowBatcher implements AutoCloseable {
                 context.logError("IMPORT_BATCH_FAILED", "Could not import batch", Map.of(
                         "statementCount", rows,
                         "message", StringUtils.defaultString(batchFailure.getMessage())));
-                if (!isSkipMode()) {
+                if (!isSkipMode() || batchFailure instanceof ReplayTransactionException) {
                     recordSequentialPrefix(batch, batchFailure);
                     throw batchFailure;
                 }
@@ -526,15 +527,53 @@ public final class ImportRowBatcher implements AutoCloseable {
     private void replayIndividually(PendingBatch batch) {
         for (int index = 0; index < batch.sqls().size(); index++) {
             try {
-                sqlExecutor.executeBatch(List.of(batch.sqls().get(index)));
+                executeReplaySafe(List.of(batch.sqls().get(index)));
                 importedCount.increment();
             } catch (RuntimeException rowFailure) {
-                if (isConnectionFailure(rowFailure)) {
+                if (rowFailure instanceof ReplayTransactionException || isConnectionFailure(rowFailure)) {
                     throw rowFailure;
                 }
                 handleRejectedRow(batch.rowNumbers().get(index), batch.rows().get(index),
                         rootMessage(rowFailure));
             }
+        }
+    }
+
+    /** Keep failed SKIP attempts isolated inside a shard-owned transaction. */
+    private void executeReplaySafe(List<String> sqls) {
+        Connection connection = Chat2DBContext.getConnection();
+        Savepoint savepoint;
+        try {
+            savepoint = isSkipMode() && !connection.getAutoCommit() ? connection.setSavepoint() : null;
+        } catch (SQLException failure) {
+            throw new ReplayTransactionException("Cannot establish import replay savepoint", failure);
+        }
+        try {
+            sqlExecutor.executeBatch(sqls);
+        } catch (RuntimeException failure) {
+            if (savepoint != null) {
+                try {
+                    connection.rollback(savepoint);
+                } catch (SQLException rollbackFailure) {
+                    failure.addSuppressed(rollbackFailure);
+                    throw new ReplayTransactionException("Cannot roll back import replay attempt", failure);
+                }
+            }
+            throw failure;
+        } finally {
+            if (savepoint != null) {
+                try {
+                    connection.releaseSavepoint(savepoint);
+                } catch (SQLException ignored) {
+                    // Some drivers release it implicitly during rollback; durability stays external.
+                }
+            }
+        }
+    }
+
+    private static final class ReplayTransactionException extends RuntimeException {
+        private ReplayTransactionException(String message, Throwable cause) {
+            super(message, cause);
         }
     }
 
@@ -1016,8 +1055,10 @@ public final class ImportRowBatcher implements AutoCloseable {
             Integer sourceIndex = resolution.fileIndexes().get(index);
             String raw = sourceIndex != null && sourceIndex < fileValues.size()
                     ? fileValues.get(sourceIndex) : null;
+            // CSV parsing already distinguishes unquoted NULL from a quoted, non-null empty string.
             boolean preserveEmpty = cells != null && spec.getExcelOptions() != null
-                    && !spec.getExcelOptions().getEmptyAsNull();
+                    && !spec.getExcelOptions().getEmptyAsNull()
+                    || cells == null && spec.getCsvOptions() != null;
             ImportCell cell = cells != null && sourceIndex != null && sourceIndex < cells.size()
                     ? cells.get(sourceIndex) : null;
             if (cell != null && raw != null && !raw.isEmpty()
@@ -1025,6 +1066,9 @@ public final class ImportRowBatcher implements AutoCloseable {
                 raw = cell.text()
                         ? CsvImportValueNormalizer.normalize(raw, column, spec.getExcelOptions(), sourceRow)
                         : CsvImportValueNormalizer.nativeValue(cell.value(), column);
+            } else if (cells == null && spec.getCsvOptions() != null && raw != null
+                    && !(options.getNullString() != null && options.getNullString().equals(raw))) {
+                raw = CsvImportValueNormalizer.normalize(raw, column, spec.getCsvOptions(), sourceRow);
             }
             tableColumnNames.add(column.getName());
             values.add(toSqlLiteral(column, raw, preserveEmpty));

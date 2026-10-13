@@ -1,6 +1,8 @@
 package ai.chat2db.community.domain.core.impl.task;
 
 import ai.chat2db.community.domain.api.model.task.Task;
+import ai.chat2db.community.domain.api.model.task.TaskControlState;
+import ai.chat2db.community.tools.exception.DataNotFoundException;
 import ai.chat2db.community.domain.api.service.task.ArtifactService;
 import ai.chat2db.community.domain.api.model.task.TaskArtifact;
 import ai.chat2db.community.domain.api.model.task.TaskConstants;
@@ -226,6 +228,77 @@ public class LocalTaskManager {
             throw new IllegalArgumentException("Task type is required");
         }
         taskExecutorRegistry.require(spec);
+    }
+
+    TaskControlState cancel(Long taskId) {
+        return control(taskId, true);
+    }
+
+    TaskControlState control(Long taskId) {
+        return control(taskId, false);
+    }
+
+    private TaskControlState control(Long taskId, boolean requestCancellation) {
+        // Same lock order as submission/exit; the runner serializes start, commit and completion
+        // with completionLock. Never publish a terminal running state before execution stops.
+        lifecycleLock.lock();
+        RunningTask runningTask = null;
+        try {
+            runningTask = runningTaskRegistry.get(taskId);
+            if (runningTask != null) runningTask.completionLock().lock();
+            Task task = taskStorage.get(taskId).orElseThrow(DataNotFoundException::new);
+            TaskControlState state = controlState(task, runningTask);
+            if (!requestCancellation || !state.isCancelSupported()) return state;
+            boolean pending = TaskStatus.PENDING.name().equals(task.getStatus());
+            boolean accepted = runningTask == null || runningTask.requestCancellation(!pending);
+            if (!accepted) return controlState(taskStorage.get(taskId).orElseThrow(), runningTask);
+            if (pending) {
+                Date now = new Date();
+                if (taskStorage.compareAndSetStatus(taskId, TaskStatus.PENDING.name(), TaskStatus.CANCELLED.name(),
+                        TaskStatusPatch.builder().stage(TaskStage.CANCELLED.name())
+                                .progressMessage("Task cancelled; previously committed data is retained")
+                                .finishedAt(now).updatedAt(now).build(),
+                        event(TaskEventCode.TASK_CANCELLED.name(), TaskEventLevel.INFO.name(),
+                                "Task cancelled; previously committed data is retained"))) {
+                    if (runningTask == null) {
+                        cleanupStoredTerminalResources(taskStorage.get(taskId).orElse(task));
+                    } else {
+                        runningTask.cleanupTerminalResources();
+                        runningTask.close();
+                        runningTask.markFinished();
+                        runningTaskRegistry.remove(taskId, runningTask);
+                        // Future.cancel alone leaves a cancelled FutureTask in the bounded queue.
+                        executor.purge();
+                    }
+                    cleanupInterruptedArtifacts(taskId);
+                }
+            } else {
+                TaskEvent requested = event(TaskEventCode.TASK_CANCELLATION_REQUESTED.name(),
+                        TaskEventLevel.INFO.name(),
+                        "Cancellation requested; previously committed data is retained");
+                requested.setTaskId(taskId);
+                taskStorage.appendEvent(requested);
+            }
+            return controlState(taskStorage.get(taskId).orElseThrow(), runningTask);
+        } finally {
+            if (runningTask != null) runningTask.completionLock().unlock();
+            lifecycleLock.unlock();
+        }
+    }
+
+    private TaskControlState controlState(Task task, RunningTask runningTask) {
+        boolean terminal = TaskStatus.isTerminal(task.getStatus());
+        boolean requested = TaskStatus.CANCELLED.name().equals(task.getStatus())
+                || runningTask != null && runningTask.cancellationToken().isCancelled();
+        String reason = terminal ? "TERMINAL"
+                : runningTask != null && runningTask.isCommitPhase() ? "COMMIT_IN_PROGRESS"
+                : runningTask != null && runningTask.shouldRetainResourcesForResume() ? "RECOVERY_IN_PROGRESS"
+                : requested ? "CANCELLATION_REQUESTED"
+                : TaskStatus.PENDING.name().equals(task.getStatus()) || runningTask != null ? "READY"
+                : "NOT_EXECUTING";
+        return TaskControlState.builder().taskId(task.getId()).status(task.getStatus())
+                .cancelSupported("READY".equals(reason)).cancellationRequested(requested)
+                .pauseSupported(false).pauseReason("SAFE_PAUSE_UNSUPPORTED").reason(reason).build();
     }
 
     int activeTaskCount(Long userId, Long organizationId) {
