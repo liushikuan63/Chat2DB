@@ -367,3 +367,98 @@ mvn -B -o -f chat2db-community-server/pom.xml -pl '<module>' -am \
 - 关键入口：本文档“问题清单”“修复记录”“端到端链路用例”；基线 `main=dc2b80a3b0189bb3fd92d69ce8f52de2d4136ac8`、HEAD `a14e73edefe7015c2113e51b836ce3a60170a12f`。
 - 环境要点：Java 用 `D:\Java\jdk\microsoft-jdk-17`；前端构建必须用 Node 20（`D:\Java\nodejs\node20.13.0`），Node 24 下 postinstall 的 `spdy` 会因 `http_parser` 绑定缺失失败；PowerShell 传 Maven 参数时每个 `-D` 都要加引号。
 - 阻塞：无。
+
+## 2026-10-13 按批次完善：执行计划与接续入口
+
+用户已要求按本轮计划顺序实施。主线基准 ea3a5c68ca290199dc86726706eb3006495ca34f；开始时功能分支 codex/fn-14-repo-hygiene，HEAD da31203fb1227a4218447228ed6515e52312818b，工作区干净。
+
+目标：先修复导入正确性，再补真实验收和用户操作闭环。以下状态属于本轮；上文旧日期、旧采样和授权描述保留其历史范围。
+
+共同约束：Java 17；既有 Maven、React/Umi、Yarn 锁文件和 i18n；保留 Community/OFFLINE/loopback、公共 API、存储与成功前缀/恢复水位；测试使用专用 fixture；没有新依赖/全局工具链修改；任何源代码修改先有能暴露缺陷的回归。根代理是唯一分支/提交/推送写入者。当前阶段使用独立 worktree，各任务不修改其他任务文件或共用构建 target。
+
+执行方法：systematic-debugging + test-driven-development + subagent-driven-development。三个第一批任务文件独立，在隔离 worktree 并行实现；根依次复核补丁并集成，执行 owning module full tests/package，再按既有授权和层级关系交付。模型与临时文件只服务本轮；不把技能默认签字/固定目录作为额外门槛。
+
+进度：第一批已完成组合代码验收；第二批进行中；第三批未开始。当前聊天 01a1211f-4275-72a0-93d9-8055bdbc0240；2026-10-13 检查成功 compact=3，rotation_due=false。详细测试/决策/下一步见本计划的 .superpowers/sdd/vibecoding/progress.md。
+
+### Task 1: Excel 预览与执行选项契约（第一批）
+
+工作区 D:/c2db-batch-20261013/excel。只修改 BaseExcelImporter.java、相关 ExcelImportReader/ImportCell 消费适配和该任务回归；不修改 ImportRowBatcher、JSONImporter、staging、TaskService 或文档。必要共享文件修改先告知根代理。
+
+消费者是保留的 mapped import preview/execute public API 和 domain API；新 Single UI 未暴露 rich ExcelOptions，不能伪造页面复现。既有 ExcelImportReader.read(File, ExcelOptions, int limit, int minimumColumns, Consumer<Map<Integer,String>>, BiConsumer<Map<Integer,ImportCell>,Integer>, Runnable) 已处理无表头、sheet、headerRow、dataStartRow/dataEndRow/columnRange。现执行直接 EasyExcel，batcher 仅 invokeHead 初始化，headerless 跳行且 finish 返回；range未使用。
+
+- [ ] 先在 ExcelImportSheetContractTest/XLSXImporterExecutionTest 或独立 owning-module fixture 测试中生成真实 XLS/XLSX：无表头首行必须入库；前导说明行+headerRow；行范围外不入库；列范围重映射与预览相同。预期值手工定义，不调用生产 helper 生成 expected。
+- [ ] 运行 Java17 Maven focused tests，确认正确原因失败；记录非零 test count、失败断言和日志。
+- [ ] 最小修复执行与预览共用 reader 语义，保留 typed/null/date/number 处理、sheet 选择、取消、STANDARD 已成功前缀和数据行 watermark。不能拒绝合法 options 或将0行报成功掩盖问题。
+- [ ] 运行上述回归及已有 Excel execution/reader contract tests，确认0fail/errors；生成补丁、diff --check、自查，保存 task-1-report.md 和 patch。不stage/commit/push，不操作root worktree，不派发子代理。
+
+### Task 2: staging 任务所有权与过期回收（第一批）
+
+工作区 D:/c2db-batch-20261013/staging。只修改 ImportFileStagingService、IImportFileStagingService/ImportTaskSubmissionServiceImpl 的必要兼容接口或归属登记、必要 domain API/storage provider 实现和相关测试；不修改 Excel/JSON importer。无新公共不兼容契约；需要共享文件时告知根代理。
+
+现 claimForTask(String fileId) 创建空 marker，无 taskId/续租。canDelete 仅按 marker>7d删；TaskService.resume 对 PENDING+checkpoint 无7d限制，LocalTaskManager 保留恢复资源。必须区分 running/resumable/terminal/真正orphan，原24h unclaimed清理保留。
+
+- [ ] 先补真实持久 marker/TaskStorage fixture：已claim且运行或可恢复8天不删除；无任务owner旧文件可回收；重启重建服务后仍保留；失败提交/成功取消删除清理幂等；旧marker兼容保守不误删。
+- [ ] 基于现实现运行失败测试，记录red证据，不仅断言mock调用或人为宣布owner消失。
+- [ ] 沿 domain API/storage 边界做最小所有权查询或持久关联。可采用已存在任务 spec 的 fileId 引用做权威所有者检查，避免无必要地增加所有 TaskStorage implementor 的抽象方法；查询失败保守保留。处理claim到任务提交之间的窗口、旧marker/进程重启、终态释放。不得仅touch mtime掩盖长期恢复，也不能只永久保留所有orphan导致配额无法回收。
+- [ ] focused tests检查非零数量/0fail，再涵盖submission/lifecycle/storage相关契约；patch+diff--check+task-2-report.md。不要stage/commit/push、派发子代理、读取用户实际数据。
+
+### Task 3: JSON 规范化键碰撞（第一批）
+
+工作区 D:/c2db-batch-20261013/json。只修改 JSONImporter/必要 JsonImportReader 边界、相关 JSON 导入测试与所属 i18n 错误契约；若不需要改 i18n 则保持。不要修改 Excel/staging/TaskService。
+
+当前 trim+lowercase 将原始 Name/name 和首尾空白别名映射同一index，cells.put静默覆盖。保留单一 key 的大小写兼容、unknown diagnostics、typed/null原生值。重点同一record、source mapping/header规范化碰撞，不能把它与JSON原文完全相同重复键的规范混淆。
+
+- [ ] 用真实 JSONImporter/H2 fixture 或现有 importer execution harness 验证 {"Name":"A","name":"B"} 明确报冲突而不写B，首尾空白/映射header同理；保留单个 Name→name 正常匹配、数字布尔null和unknown用例。
+- [ ] 运行baseline red并记录正确失败原因。
+- [ ] 生成cells和header index之前检测collision，错误包含行号/冲突原名称；显式映射若不能唯一消歧则明确拒绝，不引入 silent last-wins。
+- [ ] 运行JSONKeyMatching/JSON extension/reader/typed执行回归，非零0fail；patch+diff--check+task-3-report.md。不stage/commit/push，不派发子代理。
+
+### Task 4: JCEF 来源边界验证（第二批）
+
+核 MainJFrame onQuery→bridge→upload_local 的实际 frame/navigation capability；合法打包/允许本地dev来源与外部/iframe分开；若可达则统一来源准入并拒绝测试，否则记录反证。四个needs_review不是confirmed漏洞。匹配renderer bridge测试与实际平台验证，不消除告警代替修复。
+
+### Task 5: 显式 IT 与真实方言门禁（第二批）
+
+将 MySQLTaskRoundTripIT/StagingManifestPerformanceIT 接到真正执行入口，专用 fixture，既有MySQL三例/H2一例不可跳过；补真实export/import及恢复，PG/Maria staging、外键/提交/回滚/取消/unknown outcome；Kingbase未实测留限制。mvn test默认不发现*IT；当前POM无旧testFailureIgnore配置，不根据旧AGENTS文案造假绿问题。
+
+### Task 6: 真实浏览器任务闭环（第二批）
+
+隔离home+loopback Community后端+具名H2，页面上传/预览/映射/提交，核任务终态+数据库值+下载产物；单/多表成功、坏行、幂等响应丢失、取消；保留失败证据，后台/独立headless浏览器不抢焦点，只停止本任务进程。
+
+### Task 7: 多表逐文件预览映射（第三批）
+
+每CSV source独立options/preview/columnMappings，共用现有preview与校验；目标/选项变化失效旧结果；所有预检ready方可提交，保持stagedownership/clientSubmissionId。不扩展新格式。
+
+### Task 8: 原地重试（第三批）
+
+single preview、multi upload和目标列表失败可明确retry，只重试失败步骤，保留成功fileId/targets/dependencies，pending去重，迟到结果generation检查/资源释放，无无限自动重试。
+
+### Task 9: 单任务取消（第三批）
+
+新增安全cancel契约，queued主动terminal+cleanup，running token/resource取消，commit保护，幂等与最终状态一致；不能将cancel等同撤销已提交前缀。暂停独立safecheckpoint能力与保留资源，不用CANCELLED模拟，JSON/SQL不能无证据宣称行级resume。
+
+### Task 10: 动态上传能力（第三批）
+
+单表50MiB、多表1GiB/10GiB与staging/multipart真实限制对齐；现有能力入口优先，准确单位、保守fallback、服务端最终校验；有意的不同policy明确解释，不盲目放大安全限额。
+
+### Task 11: 准入解释和国际化（第三批）
+
+显示findings message/evidence/remediation，区分BLOCKER/DEGRADATION和requested/effectiveMode，复用ABORT/SKIP五语文案，unsupported format开关解释且保留后端拒绝。
+
+### Task 12: 用户指南与性能基线（第三批）
+
+建立当前UI/API能力矩阵与公开fixture操作指南，从README链接；历史审计不当当前交付指南。另记录固定数据集多轮性能（完整与5%rehearsal区别、吞吐/内存/连接/清理/环境），测得瓶颈再优化，保持恢复与事务合同。
+
+批次验收：第一批focused red/green+owning core full tests+受影响模块package；前端改动相关scripts+lint+Community build+实际浏览器关键流程；公共storage/API兼容test；JCEF native未运行不可称通过；所有git diff--check、stage范围/credentials/生成物检查、最终status。远程CI/head检查另记提供方限制，不能将无run记为green。
+
+### 第一批交付证据（2026-10-13，当前代码范围）
+
+- Excel 执行通过既有 reader 落实无表头、sheet/header、行列范围；typed cells 在 batcher 的行错误策略内区分原生值与文本格式，并仅在 Excel emptyAsNull=false 时保留空串。真实 XLS/XLSX/H2 回归涵盖重排映射、文本 DMY/逗号小数、原生日期/数值/布尔、空串/NULL，以及 502 行 SKIP/ABORT 的已成功前缀。数据行 watermark 不使用物理工作表行号；CSV 字符串通路保持。
+- staging 的 7 天时间只作为无 owner claim 的宽限；通过权威 TaskStorage 查询所有非终态任务顶层/多表 fileId，保护长期运行与恢复。真实 FileTaskStorage、marker 与 checkpoint 重启回归证明 8 天 owner 保留，orphan/terminal/deleted owner 可回收；存储不可用或 spec 损坏保守保留。原 24 小时 unclaimed 清理保持。
+- JSON 在 header/cells 规范化覆盖之前拒绝不同原始键的碰撞，并给出实际行号及原名称。单一别名和 typed/null 保持；第 1001 行碰撞保留已执行的 1000 行成功前缀。完全相同重复 JSON property 的 parser policy 未改变。
+- 组合验收使用 process-scoped Java17、Maven3.8.7：`mvn -B -f chat2db-community-server/pom.xml -pl :chat2db-community-domain-core -am -Dmaven.test.skip=false -DskipTests=false '-Dsurefire.includes=**/*Test.java' -Dmaven.test.failure.ignore=false clean package`，exit0。fresh Surefire 共 **1917 tests / 0 failures / 0 errors / 0 skipped**（domain-core698、storage172、tools81、API27、SPI193、MySQL714、H2 32）。先前不带 clean 的运行有5个 NoSuchMethodError，来自主线已删除 CellValueServiceImplTest 的旧 `.class`；未改源码来掩盖错误，保留首红日志后按本次构建范围 clean 重编。
+- 独立审查提出的 Excel 文本格式/empty 两项缺口已补测修复并再次复核；staging 生产注入/持久归属/历史路径已独立复核，没有剩余已确认阻断。当前证据不包括 HTTP/UI/native 或提供方 CI；这些仍在后续批次。
+
+### 第二批阶段证据（尚未完成整体验收）
+
+JCEF 在 native handler 和 backend bridge 共用入口同步检查有效主 frame、application browser 与来源；仅打包 index 精确路径或配置的 loopback origin 可调用。拒绝403并消费query；导航/销毁的旧query取消保持清理。定向10例全过；JCEF及其依赖 enabled-tests package 共343例，其中335例通过、8例因平台/fixture条件跳过。实际 Chromium/安装包未运行，不把URI测试或package记为native通过。真实方言 IT、应用启动/浏览器闭环及第三批事项仍按上列任务继续。
