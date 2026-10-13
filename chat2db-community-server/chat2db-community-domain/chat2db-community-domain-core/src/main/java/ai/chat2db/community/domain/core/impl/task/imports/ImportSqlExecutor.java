@@ -12,6 +12,7 @@ import org.apache.commons.collections4.CollectionUtils;
 import org.apache.commons.lang3.StringUtils;
 
 import java.sql.SQLException;
+import java.sql.Connection;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -146,19 +147,31 @@ public final class ImportSqlExecutor {
         return "import.sql.executionFailed";
     }
 
-    private void flushInserts(List<String> inserts) {
+    private void flushInserts(List<String> inserts) throws SQLException {
         if (inserts.isEmpty()) {
             return;
         }
         context.checkCancelled();
-        if (managesOwnTransaction()) {
+        Connection connection = Chat2DBContext.getConnection();
+        boolean ownsTransaction = false;
+        if (connection.getAutoCommit()) {
+            try {
+                ownsTransaction = !Chat2DBContext.getDbMetaData().hasOpenTransaction(connection, context)
+                        .orElse(transactionScope.isOpen());
+            } catch (SQLException failure) {
+                context.checkCancelled();
+                throw failure;
+            }
+            context.checkCancelled();
+        }
+        if (ownsTransaction) {
             DefaultSQLExecutor.getInstance().executeBatchInsert(
-                    Chat2DBContext.getConnection(), List.copyOf(inserts), context, context::checkCancelled);
+                    connection, List.copyOf(inserts), context, context::checkCancelled);
         } else {
             // The script owns the transaction: adding its INSERTs must not commit or roll back,
             // otherwise the script's own COMMIT/ROLLBACK decision is lost.
             DefaultSQLExecutor.getInstance().executeJdbcBatchInsert(
-                    Chat2DBContext.getConnection(), List.copyOf(inserts), context, context::checkCancelled);
+                    connection, List.copyOf(inserts), context, context::checkCancelled);
         }
         inserts.clear();
     }

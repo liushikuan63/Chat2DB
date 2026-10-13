@@ -119,3 +119,11 @@ mvn -B -f chat2db-community-server/pom.xml -pl :chat2db-community-domain-core -a
 每轮 importer 打开一条连接，实际 sessions 从 1 到 2 再回到 1。JSON 保留吞吐、全部预热和测量样本、每 5 ms 采样的 JVM heap 峰值代理；该值不是进程 RSS 或精确分配峰值。固定顺序可能受 JIT、GC 和缓存影响。
 
 计时包含 importer 执行、报告写入及连接清理，排除文件生成、分片预处理、验收查询、上传、队列和完整 TaskExecutor。50,000 行低于默认 100,000 行／64 MiB 准入阈值，direct fixture 也没有 opaque staged identity；实际评估不允许 ULTRA_FAST。本次没有改变门禁或伪造身份，没有 ULTRA_FAST 执行样本。以上数据只说明本机 H2 staging 路径；普通 CSV、MySQL/PostgreSQL/MariaDB 及符合准入的极速路径仍需各自基线，不据此作跨数据库性能承诺或无证据优化。
+
+## 核心事务与取消审查补充（2026-10-14）
+
+批次执行返回后、提交前重新检查取消；在该边界已经观察到取消时，回滚当前自管理块并恢复连接状态，保留此前已提交的块。真实 H2 回归覆盖“执行成功、关闭通知时取消”的窗口，原块间取消测试依据实际 commit 事件判断，不依赖取消检查的调用次数。
+
+SQL Server 插件提供同一连接的 `SELECT @@TRANCOUNT` 只读探针，覆盖命名保存点回滚和嵌套事务内层 COMMIT；探针设置 5 秒超时、登记可取消 Statement，读取失败则终止导入。其他插件通过兼容的 default SPI 方法沿用通用脚本状态；JDBC autoCommit=false 保留调用者事务。方言 SQL 保留在 SQL Server 插件，参见 [Microsoft 事务计数契约](https://learn.microsoft.com/en-us/sql/t-sql/functions/trancount-transact-sql)。
+
+生产 SQLImporter/SQL Server GO parser 的三个回归使用驱动形态代理和真实 H2 存储，属于合同验证，没有真实 SQL Server 引擎、探针驱动取消／超时的运行证据。新核心候选真实 PostgreSQL 八项验收属于上游 PR #2969 的对应源码树，不能代替所有整合路径。整合分支当前 full owning gate 为 2255 项、零失败／错误／跳过。原有显式事务失败后的连接池归还边界将在任务恢复和浏览器取消验收中继续验证。

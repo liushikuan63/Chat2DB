@@ -121,6 +121,11 @@
             <scope>test</scope>
         </dependency>
         <dependency>
+            <groupId>ai.chat2db</groupId>
+            <artifactId>chat2db-community-sqlserver</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
             <groupId>org.postgresql</groupId>
             <artifactId>postgresql</artifactId>
             <version>42.5.1</version>
