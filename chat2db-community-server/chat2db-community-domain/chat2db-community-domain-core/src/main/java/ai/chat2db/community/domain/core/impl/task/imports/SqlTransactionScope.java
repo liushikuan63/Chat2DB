@@ -56,18 +56,34 @@ final class SqlTransactionScope {
      * case-sensitive.
      */
     static Effect effectOf(String sql) {
-        String keyword = leadingKeyword(sql);
+        String statement = stripLeadingNoise(sql);
+        String keyword = leadingKeyword(statement);
         if (keyword == null) {
             return Effect.NONE;
         }
+        String controls = statement.replaceAll("(?s)/\\*.*?\\*/", " ")
+                .replaceAll("--[^\\r\\n]*", " ").toUpperCase(Locale.ROOT).trim();
+        String[] words = controls.split("[^A-Z_]+");
+        int next = 1;
+        if (words.length > next && ("WORK".equals(words[next]) || "TRANSACTION".equals(words[next]))) {
+            next++;
+        }
+        boolean chained = words.length > next + 1
+                && "AND".equals(words[next]) && "CHAIN".equals(words[next + 1]);
         switch (keyword) {
             case "BEGIN":
-            case "START":
                 return Effect.BEGIN;
+            case "START":
+                return words.length > 1 && "TRANSACTION".equals(words[1]) ? Effect.BEGIN : Effect.NONE;
             case "COMMIT":
-                return Effect.COMMIT;
+            case "END":
+                if (words.length > 1 && "PREPARED".equals(words[1])) return Effect.NONE;
+                return chained ? Effect.BEGIN : Effect.COMMIT;
             case "ROLLBACK":
-                return Effect.ROLLBACK;
+            case "ABORT":
+                if (words.length > next && "TO".equals(words[next])) return Effect.NONE;
+                if (words.length > 1 && "PREPARED".equals(words[1])) return Effect.NONE;
+                return chained ? Effect.BEGIN : Effect.ROLLBACK;
             default:
                 return Effect.NONE;
         }

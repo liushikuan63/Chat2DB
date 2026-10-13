@@ -13,6 +13,47 @@ import org.junit.jupiter.api.Test;
 class SqlTransactionScopeTest {
 
     @Test
+    void savepointRollbackKeepsTheScriptTransactionOpen() {
+        SqlTransactionScope scope = new SqlTransactionScope();
+        scope.observe("BEGIN");
+        scope.observe("ROLLBACK TO SAVEPOINT saved");
+        assertTrue(scope.isOpen());
+        scope.observe("ROLLBACK WORK TO saved");
+        assertTrue(scope.isOpen());
+        scope.observe("ROLLBACK TRANSACTION TO SAVEPOINT saved");
+        assertTrue(scope.isOpen());
+    }
+
+    @Test
+    void chainedCommitAndRollbackKeepTheNextTransactionOpen() {
+        SqlTransactionScope scope = new SqlTransactionScope();
+        scope.observe("BEGIN");
+        scope.observe("COMMIT AND CHAIN");
+        assertTrue(scope.isOpen());
+        scope.observe("ROLLBACK WORK AND CHAIN");
+        assertTrue(scope.isOpen());
+        scope.observe("COMMIT AND NO CHAIN");
+        assertFalse(scope.isOpen());
+    }
+
+    @Test
+    void postgresEndAndAbortAliasesCloseTheCurrentTransaction() {
+        SqlTransactionScope scope = new SqlTransactionScope();
+        scope.observe("BEGIN");
+        scope.observe("END");
+        assertFalse(scope.isOpen());
+        scope.observe("BEGIN");
+        scope.observe("ABORT");
+        assertFalse(scope.isOpen());
+    }
+
+    @Test
+    void unrelatedStartCommandIsNotATransaction() {
+        assertEquals(SqlTransactionScope.Effect.NONE, SqlTransactionScope.effectOf("START REPLICA"));
+        assertEquals(SqlTransactionScope.Effect.BEGIN, SqlTransactionScope.effectOf("START TRANSACTION"));
+    }
+
+    @Test
     void classifiesTransactionControlStatementsRegardlessOfCaseAndNoise() {
         assertEquals(SqlTransactionScope.Effect.BEGIN, SqlTransactionScope.effectOf("BEGIN"));
         assertEquals(SqlTransactionScope.Effect.BEGIN, SqlTransactionScope.effectOf("begin transaction"));
