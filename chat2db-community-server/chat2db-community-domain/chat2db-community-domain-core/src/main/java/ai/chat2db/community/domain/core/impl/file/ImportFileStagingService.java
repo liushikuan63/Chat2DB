@@ -1,9 +1,16 @@
 package ai.chat2db.community.domain.core.impl.file;
 
+import ai.chat2db.community.domain.api.model.task.ImportTaskSpec;
+import ai.chat2db.community.domain.api.model.task.Task;
 import ai.chat2db.community.domain.api.model.task.TaskFileFormat;
+import ai.chat2db.community.domain.api.model.task.TaskType;
 import ai.chat2db.community.domain.api.service.file.IImportFileStagingService;
+import ai.chat2db.community.domain.api.service.task.TaskStorage;
 import ai.chat2db.community.tools.exception.BusinessException;
 import ai.chat2db.community.tools.util.ConfigUtils;
+import com.alibaba.fastjson2.JSON;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
 import java.io.File;
@@ -22,6 +29,7 @@ import java.util.regex.Pattern;
 /**
  * Owns server-side import uploads between the HTTP request and asynchronous task execution.
  */
+@Slf4j
 @Component
 public class ImportFileStagingService implements IImportFileStagingService {
     private static final String STAGING_DIRECTORY_NAME = "import-preview";
@@ -43,6 +51,18 @@ public class ImportFileStagingService implements IImportFileStagingService {
     private static final String MAX_TOTAL_SIZE_PROPERTY = "chat2db.task.import.staging.max-total-bytes";
     private static final long DEFAULT_MAX_TOTAL_SIZE_BYTES = 10L * 1024L * 1024L * 1024L;
     private static final Object STAGING_QUOTA_LOCK = new Object();
+
+    private final TaskStorage taskStorage;
+
+    /** Standalone callers without an authoritative owner store retain expired claims safely. */
+    public ImportFileStagingService() {
+        this(null);
+    }
+
+    @Autowired
+    public ImportFileStagingService(TaskStorage taskStorage) {
+        this.taskStorage = taskStorage;
+    }
 
     @Override
     public String stage(File file, String originalFileName) {
@@ -286,10 +306,39 @@ public class ImportFileStagingService implements IImportFileStagingService {
         if (Files.notExists(marker, LinkOption.NOFOLLOW_LINKS)) {
             return true;
         }
-        // A claim marker only proves that some task touched the file, not that the task is still
-        // alive. When the owning task record is gone nothing will ever call release() for it, so
-        // this age fallback is the only way the staging quota can recover from an orphan.
-        return isExpired(marker, Instant.now().minus(CLAIMED_MAX_AGE));
+        // Keep the claim-to-submit window (including legacy empty markers) before consulting
+        // durable ownership. Age is only an orphan grace period, never a task lifetime limit.
+        if (!isExpired(marker, Instant.now().minus(CLAIMED_MAX_AGE))) {
+            return false;
+        }
+        if (taskStorage == null) {
+            log.warn("Retaining expired import claim: task ownership storage is unavailable");
+            return false;
+        }
+        String fileId = stagedFileId(path);
+        try {
+            for (Task task : taskStorage.listNonTerminalTasks()) {
+                if (!TaskType.DATA_FILE_IMPORT.name().equals(task.getType())
+                        && !TaskType.SQL_FILE_IMPORT.name().equals(task.getType())) {
+                    continue;
+                }
+                ImportTaskSpec spec = JSON.parseObject(task.getSpecJson(), ImportTaskSpec.class);
+                if (spec == null) {
+                    throw new IllegalStateException("Non-terminal import task has no readable spec");
+                }
+                if (fileId.equals(spec.getImportFileId())
+                        || (spec.getTableSources() != null && spec.getTableSources().stream()
+                        .anyMatch(source -> source != null && fileId.equals(source.getImportFileId())))) {
+                    return false;
+                }
+            }
+            return true;
+        } catch (RuntimeException ownerLookupFailure) {
+            // An unreadable owner is not evidence of an orphan. Do not expose stored task specs.
+            log.warn("Retaining expired import claim: task ownership lookup failed ({})",
+                    ownerLookupFailure.getClass().getSimpleName());
+            return false;
+        }
     }
 
     private static boolean isFileId(String fileId) {
