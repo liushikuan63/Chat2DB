@@ -134,6 +134,7 @@ public class TaskWebConverter {
                 .format(StringUtils.defaultIfBlank(normalize(source.getFormat()), defaultFormat))
                 .dataTimeFormat(StringUtils.defaultIfBlank(source.getDataTimeFormat(), request.getDataTimeFormat()))
                 .columnMappings(source.getColumnMappings())
+                .csvOptions(source.getCsvOptions())
                 .unmappedTarget(source.getUnmappedTarget() == null
                         ? request.getUnmappedTarget() : source.getUnmappedTarget())
                 .options(source.getOptions() == null ? request.getOptions() : source.getOptions())
