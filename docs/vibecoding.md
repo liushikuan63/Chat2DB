@@ -569,3 +569,32 @@ java "-Dloader.path=chat2db-community-server/chat2db-community-start/target/lib"
 - 浏览器用例只覆盖「必填映射阻止提交 + 真实单表导入 + 任务成功 100% + CSV 导出下载」；多表、坏行、响应丢失、运行中取消的浏览器闭环仍未跑，不能由本次结果冒充通过。
 - 真实 PostgreSQL/MySQL 保存点下的取消链路、`ImportPerformanceBaselineIT` 之外的 ULTRA_FAST 准入样本、native 安装包与平台跳过项。
 - 两个 client 测试文件的层级归属遗留（见上「层级传播与推送」），以及 fork Actions 与提供方 CI 未复核。
+
+
+## 最新修复复核与分支依赖补齐（2026-10-13）
+
+本轮保留整合分支 `d7482bc38e35c515f6cfeeff26526726c052d333` 中已经正确的生产实现。用户的 SKIP 重放取消修复经真实 H2 定向测试再次验证：`ImportRowBatcherParallelTest` 为 **4/0/0/0**，取消未写入 reject，也未继续导入后续行。
+
+复核发现目录切片传播漏掉了 parent 合并：fn10 引用了其 tree 中不存在的 `TaskControlState`，fn13 引用了不存在的上传能力 hook。已顺序合并 fn09 → fn10 → fn11 → fn12 → fn13，再由整合层继承 fn13；保留每层原提交。实际 fn11 JCEF 门禁还暴露 3 个失败：macOS launcher 被 Windows Path 改写、单实例退出期间误走 legacy mailbox、同 timestamp IPC 替换丢失。整合分支已有对应修复，因此补齐原有 `RestartCommandFactory`、`SingleInstanceUtil`、`TerminalSessionManager` 与 terminal 回归测试到所属 fn11，保留首红及复绿报告。
+
+本轮实际命令及结果：
+
+- fn10 Java17：`mvn -B -f chat2db-community-server/pom.xml -pl :chat2db-community-domain-core,:chat2db-community-web -am '-Dmaven.test.skip=false' '-DskipTests=false' '-Dsurefire.includes=**/*Test.java' '-Dmaven.test.failure.ignore=false' clean package`，exit 0；fresh 259 份 XML 共 **2145/0/0/0**，core735/web111。其 domain/core 与 fn09 一致，完整 server 最终与整合分支一致。
+- fn11 Java17：同样显式启用测试，`-pl :chat2db-community-jcef -am ... clean package`。首红为342 tests、3 failures、0 errors、8 skipped；补齐现有修复后 exit 0，**343 total / 0 failures / 0 errors / 8 skipped**，实际执行335项。JCEF150含3跳过，updater112含5跳过，tools81无跳过；不把平台/fixture跳过或 package 当作 native 安装包成功。
+- fn10 opt-in H2：`mvn -B -f chat2db-community-server/pom.xml -pl :chat2db-community-domain-core -am '-Dmaven.test.skip=false' '-DskipTests=false' '-Dtest=ImportPerformanceBaselineIT' '-Dsurefire.failIfNoSpecifiedTests=false' '-Dmaven.test.failure.ignore=false' test`，exit 0、**1/0/0/0**。12轮原始JSON/XML完整归档，指南计时直接来自本轮原始JSON。
+- fn13 Node20.13.0/Yarn1.22.22：`yarn install --frozen-lockfile`；`yarn run test:task-center`、`test:import-preview`、`test:import-export-wizard`、`test:sql-in-clipboard`、`test:shortcut`；`yarn run lint`；`yarn run build:web:community --app_version=0.0.0`，全部 exit 0，完整 prebuild 与 production bundle 检查通过。锁文件未改变。fn13 的完整 client/server 与整合层一致。
+
+分层修复提交：
+
+| 分支 | 本轮修复头 | 现有 PR |
+|---|---|---|
+| `codex/fn-10-web-api` | `053f8107ad9b40e84395c9736edb8778ea90b5f7` | #43 |
+| `codex/fn-11-runtime-messages-and-jcef` | `e0ab4ef74cba396e805e734f1bfee37ab302e730` | #44 |
+| `codex/fn-12-client-import-services` | `6fa63a5b1fddc737a972d5c01f8825da37021d70` | #45 |
+| `codex/fn-13-client-import-export-wizard` | `e3e7c788b1a7b6a64a65a13a2462a3ef64454020` | #46 |
+
+fn09 保持 `e7ad513f4156b28e18bfc47130eac12e27dd0d07`。fn14 的最终整合头与 atomic push、PR body/head/base 回读、当前 head 对应 run/check 结果记录在本地接续台账及外部动作回执中；PR沿用 #42–#47，没有新建上游PR、主线合并、发布或dispatch授权。
+
+此前两个 client 测试文件的归属疑点也已核实：fn13 已包含新版 `jcefZoom.test.ts`、`shortcutDispatch.test.ts` 和配套 `testUtils/importModule`；fn12保留该层较早版本，不能将缺少 harness 的新版单文件提早下放。用户指南已更正「Docker仍阻塞CSV下载／最终H2未复测」的过时结论。较早 MySQL 单表与81字节CSV下载成功日志已复核，本轮没有重跑浏览器或启动应用服务。
+
+本轮边界仍包括多表／坏行／响应丢失／取消浏览器闭环、新 PostgreSQL/MySQL 保存点取消验收、符合准入的 ULTRA_FAST 基线和 native 安装包。GitHub配置 `enabled=true` 不能证明当前 head 的 CI 已运行；只按实际 run/job/check 取证，不重试enable或dispatch。

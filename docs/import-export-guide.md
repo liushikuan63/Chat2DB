@@ -94,7 +94,7 @@ python -X utf8 script/test/prepare-import-browser-fixture.py --cleanup target/im
 
 准备脚本只创建具名 `c2d_ui_fixture_20261013` 数据库与 `C2D_UI_*` 表，密码只在内存、进程环境和本地加密数据源 API 中使用，不写 fixture receipt。浏览器脚本只重置 receipt 指向的 loopback fixture 表，并核验数据源 alias、URL 与端口。它目前覆盖必填映射阻止提交、真实单表导入、任务成功与 100%、CSV 导出和浏览器下载的逐字段比对；未覆盖的多表、坏行、响应丢失和取消浏览器用例不能由此脚本冒充通过。
 
-2026-10-13 已实跑单表 MySQL 上传／映射／提交，验证中文、emoji、换行和小数。导出格式切换缺陷有实际浏览器失败证据，修复后的完整下载复测被 Docker 启动故障阻塞。portable runner 的语法检查不等于该下载流程成功；此缺口需要 fixture 恢复后执行上面命令。Web 验收也不代替 JCEF native handler 或安装包验收。
+2026-10-13 Docker 恢复后，已在隔离 home、loopback MySQL fixture 与 headless 浏览器中完成单表上传／映射／提交，以及修复后的 CSV 导出下载逐字段比对：导入任务 `1791898860246999`、导出任务 `1791898862727999`，下载文件 81 字节、3 行，中文、emoji、字段内换行和小数均一致。日志最终输出 `SINGLE_IMPORT_EXPORT_BROWSER_PASSED`；收尾仅移除该测试容器并停止该轮启动的服务。详细执行证据见 [vibecoding.md](vibecoding.md) 的「真实 MySQL + 浏览器单表导入/导出闭环」。多表、坏行、响应丢失和取消浏览器用例仍未执行；Web 验收也不代替 JCEF native handler 或安装包验收。
 
 ## 本机 H2 staging 性能基线
 
@@ -108,13 +108,13 @@ mvn -B -f chat2db-community-server/pom.xml -pl :chat2db-community-domain-core -a
 
 结果写入 owning module `target/performance-baseline/h2-staging.json`。固定 seed 20261013，UTF-8 CSV 50,000 行、738,905 字节，SHA256 `cc8f164157816a77ffa2da83b97f9c84aa12cde838eb2ad3880abf1eb186fe5d`。每组 1 次预热、3 次测量；每次实际检查目标 count、sum、生产 checksum、连接关闭与 staging 表清理。rehearsal 均验证目标零行。
 
-2026-10-13，Windows、Java 17.0.12、H2 2.1.214，下面是最终 scoped CSV typed-binding 修复前的实测采样；该修复改变了被测生产路径，当前源码仍需按上方命令复测，不把旧采样作为最终版本基线：
+2026-10-13，Windows、Java 17.0.12、H2 2.1.214，最终 scoped CSV typed-binding 与 SKIP 重放取消修复后的源码已复测。下表为新接续聊天在修复依赖后的 fn10 实际 checkout 上再次运行的有效采样；其 domain/core 与整合分支对应源码一致。JUnit 为 1 个测试、0 失败／错误／跳过，包含 3 轮预热与 9 轮测量。原始 JSON 与 XML 已归档到本地 `.superpowers/sdd/vibecoding/review-reports/h2-baseline/`，没有根据旧日志重建采样：
 
 | 生产 StagingManifestImporter 场景 | 每轮处理行数 | 3 次耗时（ms） |
 | --- | ---: | --- |
-| STANDARD staging 提交 | 50,000 | 356.155 / 250.342 / 253.928 |
-| 全量 rollback rehearsal | 50,000 | 350.256 / 272.535 / 289.601 |
-| 5% rollback rehearsal | 2,500 | 36.553 / 36.140 / 38.791 |
+| STANDARD staging 提交 | 50,000 | 472.441 / 301.843 / 253.201 |
+| 全量 rollback rehearsal | 50,000 | 309.712 / 402.236 / 370.623 |
+| 5% rollback rehearsal | 2,500 | 51.730 / 48.378 / 46.516 |
 
 每轮 importer 打开一条连接，实际 sessions 从 1 到 2 再回到 1。JSON 保留吞吐、全部预热和测量样本、每 5 ms 采样的 JVM heap 峰值代理；该值不是进程 RSS 或精确分配峰值。固定顺序可能受 JIT、GC 和缓存影响。
 
