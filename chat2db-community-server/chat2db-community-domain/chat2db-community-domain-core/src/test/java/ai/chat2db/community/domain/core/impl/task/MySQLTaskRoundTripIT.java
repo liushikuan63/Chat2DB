@@ -4,7 +4,6 @@ import ai.chat2db.community.domain.api.config.DBConfig;
 import ai.chat2db.community.domain.api.config.DriverConfig;
 import ai.chat2db.community.domain.api.model.PageResponse;
 import ai.chat2db.community.domain.api.model.task.ArtifactDraft;
-import ai.chat2db.community.domain.api.service.task.ArtifactService;
 import ai.chat2db.community.domain.api.model.task.ExportTaskSpec;
 import ai.chat2db.community.domain.api.model.task.ImportColumnMapping;
 import ai.chat2db.community.domain.api.model.task.ImportManifest;
@@ -24,12 +23,8 @@ import ai.chat2db.community.domain.api.service.task.TaskCancelable;
 import ai.chat2db.community.domain.api.service.task.TaskExecutionContext;
 import ai.chat2db.community.domain.api.service.task.TaskStorage;
 import ai.chat2db.community.domain.api.service.file.IImportFileStagingService;
-import ai.chat2db.community.domain.core.impl.task.ArtifactServiceImpl;
-import ai.chat2db.community.domain.core.impl.task.ArtifactServiceImpl;
 import ai.chat2db.community.domain.core.impl.task.executor.DataFileImportTaskExecutor;
-import ai.chat2db.community.domain.core.impl.task.export.BaseExporter;
 import ai.chat2db.community.domain.core.impl.task.export.ExportCellProcessorChain;
-import ai.chat2db.community.domain.core.impl.task.export.ExportProgressLogger;
 import ai.chat2db.community.domain.core.impl.task.imports.excel.CSVImporter;
 import ai.chat2db.community.domain.core.impl.db.extension.SqlExecutionPolicyManager;
 import ai.chat2db.spi.DefaultMetaService;
@@ -65,24 +60,10 @@ import java.util.Map;
 import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
-import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
-/**
- * Local-MySQL integration test for the task pipeline: a CSV export/import round trip, a parallel
- * (multi-worker) import against real MySQL connections, and a checkpointed export interrupted
- * mid-run and resumed from its durable checkpoint.
- *
- * <p>The test talks to a dedicated local database and skips entirely unless MySQL credentials
- * are provided through environment variables:
- * <pre>
- *   C2D_MYSQL_HOST (default 127.0.0.1), C2D_MYSQL_PORT (default 3306),
- *   C2D_MYSQL_USER (default root), C2D_MYSQL_PASSWORD (required),
- *   C2D_MYSQL_DB (default c2d_task_it; dropped and recreated)
- * </pre>
- */
+/** Real, isolated MySQL export/import, checkpoint resume, manifest and capacity integration. */
 class MySQLTaskRoundTripIT {
 
     private static final String DB_TYPE = "MYSQL_TASK_IT";
@@ -126,13 +107,12 @@ class MySQLTaskRoundTripIT {
 
     @BeforeEach
     void setUp() throws Exception {
-        String host = envOr("C2D_MYSQL_HOST", "127.0.0.1");
-        String port = envOr("C2D_MYSQL_PORT", "3306");
-        String user = envOr("C2D_MYSQL_USER", "root");
-        String password = System.getenv("C2D_MYSQL_PASSWORD");
-        database = envOr("C2D_MYSQL_DB", "c2d_task_it");
-        assumeTrue(password != null && !password.isBlank(),
-                "C2D_MYSQL_PASSWORD is not set; local MySQL integration test skipped");
+        RequiredDatabaseFixture fixture = RequiredDatabaseFixture.load("MYSQL", 3306);
+        String host = fixture.host();
+        String port = String.valueOf(fixture.port());
+        String user = fixture.user();
+        String password = fixture.password();
+        database = fixture.database();
 
         String bootstrapUrl = "jdbc:mysql://" + host + ":" + port + "/?allowPublicKeyRetrieval=true"
                 + "&useSSL=false&serverTimezone=UTC&connectTimeout=5000&socketTimeout=120000"
@@ -202,6 +182,7 @@ class MySQLTaskRoundTripIT {
         } else {
             Chat2DBContext.PLUGIN_MAP.put(DB_TYPE, previousPlugin);
         }
+        System.clearProperty("chat2db.task.import.checkpoint-interval");
         System.clearProperty("chat2db.task.import.parallelism");
         System.clearProperty("chat2db.task.import.parallel.min-bytes");
         System.clearProperty("chat2db.task.import.parallel.min-rows");
@@ -221,11 +202,6 @@ class MySQLTaskRoundTripIT {
         driverConfig.setJdbcDriver(MYSQL_DRIVER_NAME);
         driverConfig.setJdbcDriverClass("com.mysql.cj.jdbc.Driver");
         return driverConfig;
-    }
-
-    private static String envOr(String name, String fallback) {
-        String value = System.getenv(name);
-        return value == null || value.isBlank() ? fallback : value;
     }
 
     private TaskExecutionContextImpl contextFor() {
@@ -272,6 +248,75 @@ class MySQLTaskRoundTripIT {
                         .build())
                 .build();
         new CSVImporter().run(spec, contextFor());
+    }
+
+    @Test
+    void exportedCsvRoundTripsAllValuesIncludingNullAndQuotedText() throws Exception {
+        try (Statement statement = connection.createStatement()) {
+            statement.executeUpdate("UPDATE C2D_SRC SET NAME = 'comma, quote\" and \u4e2d\u6587 \ud83d\ude00\nnext line' WHERE ID = 1");
+            statement.executeUpdate("UPDATE C2D_SRC SET NAME = NULL, VAL = NULL WHERE ID = 2");
+        }
+        File exported = tempDirectory.resolve("roundtrip.csv").toFile();
+        new ai.chat2db.community.domain.core.impl.task.export.excel.CsvDataExporter(
+                new ExportCellProcessorChain(List.of()), new SqlExecutionPolicyManager(List.of()))
+                .run(ExportTaskSpec.builder().format("CSV").containsHeader(true).tableNames(List.of("C2D_SRC"))
+                        .target(TaskTargetSnapshot.builder().dataSourceId(1L).databaseName(database).build())
+                        .build(), contextFor(), exported);
+        assertTrue(exported.length() > 0);
+        System.out.println("CSV_DEFAULT_CHARSET " + java.nio.charset.Charset.defaultCharset().name());
+        String exportedText = Files.readString(exported.toPath(), StandardCharsets.UTF_8);
+        assertTrue(exportedText.contains("\u4e2d\u6587 \ud83d\ude00"));
+        createCopyTable("C2D_ROUNDTRIP");
+        ImportTaskSpec spec = standardSpec("C2D_ROUNDTRIP", exported.toPath());
+        new CSVImporter().run(spec, contextFor());
+        assertExactCopy("C2D_ROUNDTRIP");
+    }
+
+    @Test
+    void standardImportResumesFromPersistedCheckpointExactlyOnce() throws Exception {
+        System.setProperty("chat2db.task.import.checkpoint-interval", "1");
+        Path csv = tempDirectory.resolve("resume.csv");
+        StringBuilder content = new StringBuilder("ID,NAME,VAL\n");
+        for (int id = 1; id <= ROWS; id++) {
+            content.append(id).append(",row-").append(id).append(',').append(id * 2).append('\n');
+        }
+        Files.writeString(csv, content, StandardCharsets.UTF_8);
+        createCopyTable("C2D_RESUME");
+        ImportTaskSpec spec = standardSpec("C2D_RESUME", csv);
+        RecordingContext interrupted = new RecordingContext(1);
+        assertThrows(TaskCancelledException.class, () -> new CSVImporter().run(spec, interrupted));
+        long prefix = countRows("C2D_RESUME");
+        assertTrue(prefix > 0 && prefix < ROWS, "interruption must leave a committed prefix");
+        assertTrue(interrupted.saved.stream().anyMatch(state -> state.getRowsDone() == prefix));
+        Path checkpoint = tempDirectory.resolve("checkpoint.json");
+        Files.writeString(checkpoint, com.alibaba.fastjson2.JSON.toJSONString(interrupted.saved));
+        RecordingContext resumed = new RecordingContext(Integer.MAX_VALUE);
+        resumed.resumeStates.addAll(com.alibaba.fastjson2.JSON.parseArray(
+                Files.readString(checkpoint), ResumeState.class));
+        // A new task id avoids recovering the first attempt's in-process/journal state.
+        resumed.id = 100L;
+        new CSVImporter().run(spec, resumed);
+        assertExactCopy("C2D_RESUME");
+    }
+
+    private ImportTaskSpec standardSpec(String table, Path csv) {
+        return ImportTaskSpec.builder().taskType("DATA_FILE_IMPORT").format("CSV").mode("STANDARD")
+                .sourceFile(csv.toString()).target(TaskTargetSnapshot.builder().dataSourceId(1L)
+                        .databaseName(database).tableName(table).build())
+                .options(ImportOptions.builder().charset("UTF-8").delimiter(",").onError("ABORT")
+                        .columnMappings(List.of(new ImportColumnMapping("ID", "ID"),
+                                new ImportColumnMapping("NAME", "NAME"), new ImportColumnMapping("VAL", "VAL")))
+                        .build()).build();
+    }
+
+    private void assertExactCopy(String table) throws Exception {
+        assertEquals(ROWS, countRows(table));
+        try (Statement statement = connection.createStatement(); ResultSet rows = statement.executeQuery(
+                "SELECT COUNT(*) FROM C2D_SRC s JOIN " + table
+                        + " t ON s.ID = t.ID WHERE (s.NAME <=> t.NAME) AND (s.VAL <=> t.VAL)")) {
+            assertTrue(rows.next());
+            assertEquals(ROWS, rows.getLong(1), "every original value and SQL NULL must survive exactly once");
+        }
     }
 
     @Test
@@ -359,6 +404,7 @@ class MySQLTaskRoundTripIT {
 
     private static final class RecordingContext implements TaskExecutionContext {
 
+        private Long id = 99L;
         private final List<ResumeState> saved = new ArrayList<>();
         private final List<ResumeState> resumeStates = new ArrayList<>();
         private final int cancelAfterCheckpoints;
@@ -370,7 +416,7 @@ class MySQLTaskRoundTripIT {
 
         @Override
         public Long taskId() {
-            return 99L;
+            return id;
         }
 
         @Override
