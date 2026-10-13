@@ -537,9 +537,19 @@ java "-Dloader.path=chat2db-community-server/chat2db-community-start/target/lib"
 
 `/api/cli/v1/runtime/capabilities` 在本社区构型下未映射（同样落到 SPA 兜底），本轮不作为验收项。隔离 home 的社区密钥按 `~/.config/chat2db-community/encryption.key` 生成，密钥本身不落库、不入文档与汇报。
 
+### 真实 MySQL + 浏览器单表导入/导出闭环（Docker 已恢复，2026-10-13）
+
+按 `docs/import-export-guide.md`「可复用验收」执行：隔离 home 后端（10825）+ Node 20 前端 dev server（`127.0.0.1:8889`，`/api` 代理到 10825）+ 具名 loopback MySQL fixture（`mysql:8` 容器、具名库 `c2d_ui_fixture_20261013`、驱动 `mysql-ui-fixture-8.3.0.jar`），用 Playwright 走真实浏览器（headless，不抢焦点）：
+
+- `PREVIEW_PASSED` → `SUBMITTED 1791898860246999` → `DATABASE_VALUES_PASSED`：真实 MySQL 行为 `[["1","中文,hello","12.34"],["2","emoji😀","56.78"],["3","line\nbreak","90.12"]]`，中文、emoji、字段内换行与小数逐字段一致。
+- 导出：`EXPORTED` 任务 1791898862727999，产物 `Export table data - c2d_ui_fixture_20261013.C2D_UI_SINGLE.csv`（81 字节），`BROWSER_DOWNLOAD_VALUES_PASSED` 3 行逐字段比对，最终 `SINGLE_IMPORT_EXPORT_BROWSER_PASSED`。这条正是上批「被 Docker 启动故障阻塞」的下载复测。
+- 证据留档：`target/import-browser-evidence/{single-success.png, initial-ui.png, single-real-task.json, export-task.json, export.csv, initial-ui.json}`；日志 `.superpowers/sdd/vibecoding/logs/{browser-e2e-backend.log, browser-e2e-frontend.log, browser-e2e-run.log}`。
+- 收尾：`--cleanup` 已移除具名容器（`REMOVED d1b271876a82449db9857cc723987952ef9a4a315ce7351bea851a7d6d03d87f`），只停本轮启动的后端/前端进程，10825 与 8889 均已释放，未触碰其它容器。
+- 一处操作失误已复原并留痕：首启误用真实 home 的 `user.home`（4 秒后即停），且驱动 jar 被下到真实 home 的 `jdbc-lib`；该 jar 已删除（恢复为仅 `h2-2.1.214.jar`），真实 home 只多了该实例自写的 `dev/logs/*` 与 `storage/result-snapshot/index-22724.json`，未再改动以避免误删用户数据。此后所有后端均使用 `.superpowers/sdd/vibecoding/http-smoke-home` 隔离 home。
+
 ### 本批仍未完成
 
-- 运行时任务级验收：真实上传/多表/坏行/下载/响应丢失，以及「运行中任务被取消」的端到端链路，都需要真实数据源与 Docker/MySQL（见下条），本轮 HTTP 验收只覆盖 capability/control/list 端点。
-- Docker 恢复后的真实 MySQL 单/多表/下载/坏行/响应丢失/取消浏览器闭环、真实新 PG/MySQL 保存点与取消、native 安装包与平台跳过项。
+- 浏览器用例只覆盖「必填映射阻止提交 + 真实单表导入 + 任务成功 100% + CSV 导出下载」；多表、坏行、响应丢失、运行中取消的浏览器闭环仍未跑，不能由本次结果冒充通过。
+- 真实 PostgreSQL/MySQL 保存点下的取消链路、`ImportPerformanceBaselineIT` 之外的 ULTRA_FAST 准入样本、native 安装包与平台跳过项。
 - 层级传播（fn09–fn13）与现有 PR 更新；未执行前不得按「已完成」上报。
-- 本轮未复核的既有缺口（沿用上批记录，未改变）：提供方 Actions 限制、ULTRA_FAST 样本缺失、Kingbase 未实测。
+- 本轮未复核的既有缺口（沿用上批记录，未改变）：提供方 Actions 限制、Kingbase 未实测。
