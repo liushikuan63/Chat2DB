@@ -1,6 +1,10 @@
 package ai.chat2db.community.web.api.model.request.task;
 
 import ai.chat2db.community.domain.api.model.task.ImportOptions;
+import ai.chat2db.community.domain.api.model.task.CsvOptions;
+import ai.chat2db.community.domain.api.model.task.ExcelOptions;
+import ai.chat2db.community.domain.api.model.task.JsonOptions;
+import ai.chat2db.community.domain.api.model.task.SqlImportOptions;
 import ai.chat2db.community.domain.api.model.task.ImportFinalizationOptions;
 import ai.chat2db.community.domain.api.model.task.ImportRollbackOptions;
 import ai.chat2db.community.domain.api.model.task.ImportStagingPolicy;
@@ -54,6 +58,15 @@ public class TaskImportRequest extends DataSourceBaseRequest {
     private String format;
 
     private String dataTimeFormat;
+
+    /** Legacy format-specific options remain accepted alongside rich ImportOptions. */
+    private CsvOptions csvOptions;
+
+    private ExcelOptions excelOptions;
+
+    private JsonOptions jsonOptions;
+
+    private SqlImportOptions sqlImportOptions;
 
     private ImportOptions options;
 
