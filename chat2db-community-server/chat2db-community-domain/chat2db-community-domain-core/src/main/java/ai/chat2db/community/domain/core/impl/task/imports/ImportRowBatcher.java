@@ -529,6 +529,11 @@ public final class ImportRowBatcher implements AutoCloseable {
             try {
                 executeReplaySafe(List.of(batch.sqls().get(index)));
                 importedCount.increment();
+            } catch (TaskCancelledException cancellation) {
+                // A cancelled task is not a bad row. Recording it as rejected would write the row
+                // and every row behind it into the reject file, so the cancellation must propagate
+                // here instead of being handled by the row error policy.
+                throw cancellation;
             } catch (RuntimeException rowFailure) {
                 if (rowFailure instanceof ReplayTransactionException || isConnectionFailure(rowFailure)) {
                     throw rowFailure;

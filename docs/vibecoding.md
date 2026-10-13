@@ -474,7 +474,7 @@ JCEF 在 native handler 和 backend bridge 共用入口同步检查有效主 fra
 - 用户指南与 portable fixture/真实单表浏览器 runner 已加入；fixture 归属清理测试 3 例通过，runner 仅做语法检查。已有本机 H2 staging 12 轮基线是最终 typed-binding 修复前采样，需最终源码复测；没有符合准入的 ULTRA_FAST 样本或真实数据库性能结论。
 - Docker 遗留 socket 清理虽已获用户授权，实际删除命令被工具策略拒绝，未执行；后台启动故障未恢复。真实 MySQL 下载、多表、坏行、响应丢失与取消浏览器闭环保持未完成。提供方 Actions 使用限制、JCEF/native 平台缺口单独保留。
 
-接续首项需补充 SKIP 逐行重放时的取消回归：`ImportRowBatcher.replayIndividually` 当前 `catch(RuntimeException)` 未单独传播 `TaskCancelledException`，可能把已请求取消后的剩余行记为 reject。外层 token 的最终 CANCELLED 不能替代及时退出与准确 reject/progress；该风险尚未修复，不能把新取消入口宣布为全部执行路径已验收。先用真实 H2/受控 JDBC 取消 fixture 复现，再最小修复并重跑 owning core+web 门禁，随后进行性能复测、运行时 HTTP、层级传播与现有 PR 更新。
+接续首项需补充 SKIP 逐行重放时的取消回归：`ImportRowBatcher.replayIndividually` 当前 `catch(RuntimeException)` 未单独传播 `TaskCancelledException`，可能把已请求取消后的剩余行记为 reject。外层 token 的最终 CANCELLED 不能替代及时退出与准确 reject/progress；该风险已于 2026-10-13 修复并补上回归（见文末「SKIP 重放取消修复」）；真实 PG/MySQL 保存点路径与浏览器验收仍未完成，仍不能把新取消入口宣布为全部执行路径已验收。先用真实 H2/受控 JDBC 取消 fixture 复现，再最小修复并重跑 owning core+web 门禁，随后进行性能复测、运行时 HTTP、层级传播与现有 PR 更新。
 
 
 ### 用户要求暂停后的落盘（2026-10-13）
@@ -486,3 +486,34 @@ JCEF 在 native handler 和 backend bridge 共用入口同步检查有效主 fra
 恢复顺序：先核验聊天轮转与 root/worktree/分支/脏状态；处理 SKIP replay cancellation 回归与修复，重跑明确启用测试的 core+web package；再复测最终 H2 baseline、构建新 startup jar 并做真实 capability/control HTTP 验收。Docker 恢复后执行真实 MySQL 单/多表、下载、坏行、响应丢失和取消浏览器验收。通过对应门禁后再按现有授权将语义提交传播到所属 fn 层、推送并更新现有 PR，复查提供方 CI。native、真实新 PG/MySQL 保存点和符合准入的 ULTRA_FAST 性能缺口继续明确记录。
 
 详细原始命令、XML 统计、失败证据、进程/fixture 归属及补丁标识保存在本机 `.superpowers/sdd/vibecoding/progress.md`。该目录按已有规则保持本地，源码、用户指南与本文件是版本化产物。没有把暂停解释为全部计划完成。
+
+## 恢复任务后第一批：SKIP 重放取消修复与最终 H2 基线（2026-10-13）
+
+### 修复对象与最小改动
+
+`ImportRowBatcher.replayIndividually` 原 `catch (RuntimeException)` 会把 `TaskCancelledException` 交给行错误策略，把「因取消而放弃的行」写进 reject 文件并计入 `rejectedRows`。现单独 `catch (TaskCancelledException)` 原样抛出（`chat2db-community-domain-core/.../task/imports/ImportRowBatcher.java` 重放循环首行），取消因此走既有失败传播：不写 reject、`fullyHandled` 保持 false、`inFlightFirstRows` 不摘除（水位不前进）。改动 5 行，未新增公共 API、未改存储与恢复契约。
+
+### 回归用例（真实 H2 + 受控取消）
+
+`ImportRowBatcherParallelTest.cancellationDuringSkipReplayIsNotRecordedAsARejectedRow`：CSV 5 行（其中一行主键重复）、`onError=SKIP`，取消用真实 `RunningTask.requestCancellation(true)` 触发，触发点是第一条 `IMPORT_ROW_REJECTED` 事件落库之后（等价于用户在 SKIP 重放期间点取消）。断言三件事：reject 文件只允许 1 行（真正的坏行）、取消不得新增 reject 事件、取消点之后的行不得入库。
+
+- 红（修复前）：`only the genuinely bad row may be written to the reject file ==> expected: <1> but was: <2>`，被取消的行确实进了 reject 文件。日志 `.superpowers/sdd/vibecoding/logs/red-ImportRowBatcherParallelTest.log`。
+- 绿（修复后）：同命令 `Tests run: 4, Failures: 0, Errors: 0, Skipped: 0`，exit 0。日志 `.superpowers/sdd/vibecoding/logs/green-ImportRowBatcherParallelTest.log`。
+- owning 门禁（明确启用测试、覆盖 includes 与 failure-ignore）：`mvn -B -f chat2db-community-server/pom.xml -pl :chat2db-community-domain-core,:chat2db-community-web -am "-Dmaven.test.skip=false" "-DskipTests=false" "-Dsurefire.includes=**/*Test.java" "-Dmaven.test.failure.ignore=false" clean package`，exit 0 / `BUILD SUCCESS`，domain-core **735/0/0/0**（上批 734，恰为本轮新增用例）、web **111/0/0/0**。日志 `.superpowers/sdd/vibecoding/logs/package-core-web-20261013.log`。
+- 同族扫查：reject 记账与取消传播路径（`ImportSqlExecutor.executeBatch/executeSql`、`executeReplaySafe`、`CsvManifestImporter` 的 reject 计数包装、`ImportManifestScheduler`、`StagingManifestImporter` 的失败报告）未发现第二处「把取消记为行失败」的分支；分片/清单层只做报告并原样抛出，终态仍由外层 token 决定。
+
+### 最终 H2 性能基线复测（typed-binding 修复后的源码）
+
+命令同 owning 门禁，`-Dtest=ImportPerformanceBaselineIT`：`Tests run: 1, Failures: 0, Errors: 0, Skipped: 0`，exit 0。12 个采样（每场景 4 轮，含 warmup），行数、校验和与回滚校验由用例内断言把关：
+
+| 场景 | 行数 | 有效轮 rows/s（round 1/2/3） |
+|---|---|---|
+| STANDARD_STAGING_COMMIT | 50000 | 136092 / 204374 / 179898 |
+| REHEARSAL_FULL | 50000 | 158916 / 149237 / 148788 |
+| REHEARSAL_5_PERCENT | 2500 | 56802 / 54643 / 54634 |
+
+结论只适用于本机 H2 与本地构型：不是 MySQL/PostgreSQL 性能结论，也没有符合准入的 ULTRA_FAST 样本。日志 `.superpowers/sdd/vibecoding/logs/h2-baseline-20261013.log`。
+
+### 本批仍未完成
+
+运行时 capability/control HTTP 验收（新 startup jar）、Docker 恢复后的真实 MySQL 单/多表/下载/坏行/响应丢失/取消浏览器闭环、真实新 PG/MySQL 保存点与取消、native 安装包与平台跳过项、层级传播（fn09–fn13）与现有 PR 更新。未执行前不得按「已完成」上报。
