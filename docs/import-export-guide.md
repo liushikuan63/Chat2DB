@@ -137,3 +137,11 @@ mvn -B -f chat2db-community-server/pom.xml -pl :chat2db-community-domain-core -a
 SQL Server 插件提供同一连接的 `SELECT @@TRANCOUNT` 只读探针，覆盖命名保存点回滚和嵌套事务内层 COMMIT；探针设置 5 秒超时、登记可取消 Statement，读取失败则终止导入。其他插件通过兼容的 default SPI 方法沿用通用脚本状态；JDBC autoCommit=false 保留调用者事务。方言 SQL 保留在 SQL Server 插件，参见 [Microsoft 事务计数契约](https://learn.microsoft.com/en-us/sql/t-sql/functions/trancount-transact-sql)。
 
 生产 SQLImporter/SQL Server GO parser 的三个回归使用驱动形态代理和真实 H2 存储，属于合同验证，没有真实 SQL Server 引擎、探针驱动取消／超时的运行证据。新核心候选真实 PostgreSQL 八项验收属于上游 PR #2969 的对应源码树，不能代替所有整合路径。整合分支当前 full owning gate 为 2255 项、零失败／错误／跳过。原有显式事务失败后的连接池归还边界将在任务恢复和浏览器取消验收中继续验证。
+
+### 脚本取消与恢复的真实边界（2026-10-14）
+
+隔离 MySQL 的显式 BEGIN 脚本取消复现了任务已 CANCELLED、连接47仍在 innodb_trx 的泄漏。普通脚本初始 JDBC autoCommit=true 时，失败／取消／Error 会先从当前 ConnectInfo 脱离该借用连接再关闭，避免脏事务回池；初始 autoCommit=false 的 caller 保留自身事务决定，exporter profile 继续其既有清理路径。四个真实 H2 回归验证取消、执行失败、caller 事务与已提交前缀。整合 owning package2264/0/0/0，修复后的真实 MySQL 取消任务1791934067591999 终态为 CANCELLED，未提交行0，原连接与事务均消失。close 失败物理会话消失、成功脚本遗漏 COMMIT 和其他真实引擎尚不据此宣称覆盖。
+
+真实后端强杀／重启验证：STANDARD+SKIP 的任务1791933145770999 在已提交500行后中断，重启恢复为 PENDING/RESUMING，同一任务最终1500行且字段一致；各阶段重复提交均返回原ID，重复 resume 被拒绝。但默认 STANDARD/ABORT 在已提交622行、本地 checkpoint500时中断，恢复重放导致1062主键错误。仅本地 checkpoint 不能消除跨持久化提交窗口，不能将前一个成功推广为默认模式可靠恢复。用户已授权目标数据库工具管理回执表，回执与目标行同事务的修复及无唯一键验证正在进行，尚未完成验收。
+
+当前整合源码的浏览器上传→预览→KEY映射ID→导入结果和真实CSV下载已重新跑通：任务1791933196875999、导出1791933199157999，中文、emoji、字段内换行、小数逐字段一致。取消／响应丢失浏览器路径仍待后续阶段验证。
