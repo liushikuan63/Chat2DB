@@ -10,7 +10,8 @@ import ai.chat2db.community.domain.core.impl.task.imports.ImportRowBatcher;
 import ai.chat2db.community.domain.core.impl.task.imports.IImportStrategy;
 import ai.chat2db.spi.IValueProcessor;
 import ai.chat2db.spi.sql.Chat2DBContext;
-import com.alibaba.excel.EasyExcel;
+import ai.chat2db.community.domain.core.impl.task.imports.reader.ExcelImportReader;
+import ai.chat2db.community.domain.core.impl.task.imports.reader.ImportCell;
 import com.alibaba.excel.context.AnalysisContext;
 import com.alibaba.excel.event.AnalysisEventListener;
 import com.alibaba.excel.metadata.data.ReadCellData;
@@ -33,7 +34,6 @@ public abstract class BaseExcelImporter extends BaseImporter {
 
     @Override
     protected void doImportData(ImportTaskSpec spec, TaskExecutionContext context, List<TableColumn> columns) {
-        ExcelTypeEnum excelType = getExcelType();
         // Materialise the validated defaults so the row builder reads the same values it will act
         // on, even when the client sent no Excel options at all (as CSV does for CsvOptions).
         spec.setExcelOptions(spec.getExcelOptions() == null
@@ -43,11 +43,9 @@ public abstract class BaseExcelImporter extends BaseImporter {
         try (NoModelDataListener listener = new NoModelDataListener(spec, context, columns,
                 Chat2DBContext.getDbMetaData().getValueProcessor())) {
             try {
-                EasyExcel.read(new File(spec.getSourceFile()), listener)
-                        .excelType(excelType)
-                        .sheet(excelOptions.getSheetIndex())
-                        .headRowNumber(excelOptions.getHasHeader() ? excelOptions.getHeaderRow() : 0)
-                        .doRead();
+                ExcelImportReader.read(new File(spec.getSourceFile()), excelOptions,
+                        Integer.MAX_VALUE, columns.size(), listener::acceptHead,
+                        listener::acceptCells, context::checkCancelled);
                 context.checkCancelled();
                 listener.finish("Excel import finished");
             } catch (RuntimeException failure) {
@@ -168,6 +166,19 @@ public abstract class BaseExcelImporter extends BaseImporter {
                 values.add(row.get(index));
             }
             batcher.accept(++rowNumber, values);
+        }
+
+        /** The watermark counts selected data rows, not physical workbook row numbers. */
+        void acceptCells(Map<Integer, ImportCell> row, int currentRow) {
+            this.taskContext.checkCancelled();
+            if (batcher == null || resolution == null) {
+                return;
+            }
+            List<ImportCell> values = new ArrayList<>(resolution.matches().size());
+            for (int index = 0; index < resolution.matches().size(); index++) {
+                values.add(row.get(index));
+            }
+            batcher.acceptCells(++rowNumber, values);
         }
 
         @Override

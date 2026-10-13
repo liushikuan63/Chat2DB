@@ -9,6 +9,8 @@ import ai.chat2db.community.domain.api.model.task.TaskCancelledException;
 import ai.chat2db.community.domain.api.model.task.TaskErrorCode;
 import ai.chat2db.community.domain.api.model.task.TaskExecutionException;
 import ai.chat2db.community.domain.api.model.task.TaskExecutionMode;
+import ai.chat2db.community.domain.core.impl.task.imports.reader.ImportCell;
+import ai.chat2db.community.domain.core.impl.task.imports.excel.CsvImportValueNormalizer;
 import ai.chat2db.community.domain.api.model.value.SQLDataValue;
 import ai.chat2db.community.domain.api.service.task.TaskExecutionContext;
 import ai.chat2db.community.domain.core.impl.task.AdaptiveBatchSizer;
@@ -305,14 +307,25 @@ public final class ImportRowBatcher implements AutoCloseable {
 
     public void accept(long fileRowNumber, List<String> fileValues) {
         try {
-            acceptRow(fileRowNumber, fileValues);
+            acceptRow(fileRowNumber, fileValues, null);
         } catch (RuntimeException taskFailure) {
             recordFailure(taskFailure);
             throw taskFailure;
         }
     }
 
-    private void acceptRow(long fileRowNumber, List<String> fileValues) {
+    /** Excel retains native cell types until conversion inside the ordinary row error policy. */
+    public void acceptCells(long fileRowNumber, List<ImportCell> cells) {
+        List<String> rawValues = cells.stream().map(cell -> cell == null ? null : cell.display()).toList();
+        try {
+            acceptRow(fileRowNumber, rawValues, cells);
+        } catch (RuntimeException taskFailure) {
+            recordFailure(taskFailure);
+            throw taskFailure;
+        }
+    }
+
+    private void acceptRow(long fileRowNumber, List<String> fileValues, List<ImportCell> cells) {
         context.checkCancelled();
         throwIfFailed();
         if (fileRowNumber <= resumeBelowRow) {
@@ -322,7 +335,7 @@ public final class ImportRowBatcher implements AutoCloseable {
         String sql;
         String raw;
         try {
-            sql = buildInsert(fileValues);
+            sql = buildInsert(fileValues, cells, fileRowNumber);
             raw = JSON.toJSONString(fileValues);
         } catch (RuntimeException conversionFailure) {
             handleFailedRow(fileRowNumber, fileValues, conversionFailure);
@@ -995,7 +1008,7 @@ public final class ImportRowBatcher implements AutoCloseable {
         return rejectWriter;
     }
 
-    private String buildInsert(List<String> fileValues) {
+    private String buildInsert(List<String> fileValues, List<ImportCell> cells, long sourceRow) {
         List<String> tableColumnNames = new ArrayList<>(resolution.tableColumns().size());
         List<String> values = new ArrayList<>(resolution.tableColumns().size());
         for (int index = 0; index < resolution.tableColumns().size(); index++) {
@@ -1003,8 +1016,18 @@ public final class ImportRowBatcher implements AutoCloseable {
             Integer sourceIndex = resolution.fileIndexes().get(index);
             String raw = sourceIndex != null && sourceIndex < fileValues.size()
                     ? fileValues.get(sourceIndex) : null;
+            boolean preserveEmpty = cells != null && spec.getExcelOptions() != null
+                    && !spec.getExcelOptions().getEmptyAsNull();
+            ImportCell cell = cells != null && sourceIndex != null && sourceIndex < cells.size()
+                    ? cells.get(sourceIndex) : null;
+            if (cell != null && raw != null && !raw.isEmpty()
+                    && !(options.getNullString() != null && options.getNullString().equals(raw))) {
+                raw = cell.text()
+                        ? CsvImportValueNormalizer.normalize(raw, column, spec.getExcelOptions(), sourceRow)
+                        : CsvImportValueNormalizer.nativeValue(cell.value(), column);
+            }
             tableColumnNames.add(column.getName());
-            values.add(toSqlLiteral(column, raw));
+            values.add(toSqlLiteral(column, raw, preserveEmpty));
         }
         return sqlBuilder.dml().buildInsert(SingleInsertSqlRequest.builder()
                 .databaseName(connectInfo.getDatabaseName())
@@ -1015,11 +1038,11 @@ public final class ImportRowBatcher implements AutoCloseable {
                 .build());
     }
 
-    private String toSqlLiteral(TableColumn column, String raw) {
+    private String toSqlLiteral(TableColumn column, String raw, boolean preserveEmpty) {
         if (raw == null || (options.getNullString() != null && options.getNullString().equals(raw))) {
             return null;
         }
-        if (raw.isEmpty()) {
+        if (raw.isEmpty() && !preserveEmpty) {
             return null;
         }
         DataType dataType = new DataType();
