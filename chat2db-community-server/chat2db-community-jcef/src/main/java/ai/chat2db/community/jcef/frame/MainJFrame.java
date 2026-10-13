@@ -53,7 +53,6 @@ import org.cef.handler.CefDragHandler;
 import org.cef.handler.CefFocusHandler;
 import org.cef.handler.CefFocusHandlerAdapter;
 import org.cef.handler.CefLoadHandlerAdapter;
-import org.cef.handler.CefMessageRouterHandlerAdapter;
 import org.cef.network.CefRequest;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -104,6 +103,7 @@ public class MainJFrame extends JFrame {
     private CefApp cefApp_;
     private CefClient client_;
     private CefBrowser browser_;
+    private volatile String trustedFrontendUrl;
     private Component browserUI_;
     private JCefAppConfig jcefAppConfig_;
     private volatile boolean windowFullScreen = false;
@@ -656,9 +656,9 @@ public class MainJFrame extends JFrame {
         CefMessageRouter messageRouter = CefMessageRouter.create(
                 new CefMessageRouter.CefMessageRouterConfig("javaQuery", "javaCancelQuery")
         );
-        messageRouter.addHandler(new CefMessageRouterHandlerAdapter() {
+        messageRouter.addHandler(new TrustedJcefQueryHandler(() -> browser_, () -> trustedFrontendUrl) {
             @Override
-            public boolean onQuery(CefBrowser browser, CefFrame frame, long queryId, String data,
+            protected boolean handleTrustedQuery(CefBrowser browser, CefFrame frame, long queryId, String data,
                                    boolean persistent, CefQueryCallback callback) {
                 CancellableCefQueryCallback guardedCallback = new CancellableCefQueryCallback(callback);
                 activeQueryCallbacks.put(queryId, guardedCallback);
@@ -764,6 +764,7 @@ public class MainJFrame extends JFrame {
                 throw new BusinessException("Failed to load frontend files");
             }
         }
+        this.trustedFrontendUrl = indexHtmlFile;
         this.browser_ = this.client_.createBrowser(indexHtmlFile, CefRendering.DEFAULT, false);
         this.browserUI_ = browser_.getUIComponent();
         if (WindowsDesktopWindowChrome.isEnabled(OS.isWindows())) {
