@@ -1,4 +1,6 @@
 import type { FileUrl } from '@/components/UploadLocalFile';
+import type { ICsvOptions, IImportPreview } from '@/typings/importExport';
+import { sourcePreviewReady, updateSourceSelection } from './sourcePreview';
 
 export interface MultiTableTarget {
   databaseName?: string;
@@ -16,6 +18,13 @@ export interface MultiTableSourceDraft {
   fileId?: string;
   status: MultiTableSourceStatus;
   error?: string;
+  csvOptions?: ICsvOptions;
+  preview?: IImportPreview;
+  previewKey?: string;
+  previewStatus?: 'LOADING' | 'READY' | 'ERROR';
+  previewError?: string;
+  columnMappings?: Record<string, string | undefined>;
+  unmappedTarget?: 'DEFAULT' | 'NULL';
 }
 
 export interface LogicalDependencyDraft {
@@ -51,9 +60,7 @@ export const findAutomaticTargetKey = (
   targets: MultiTableTarget[],
   unavailableTargetKeys: Set<string>,
 ) => {
-  const matches = targets.filter(
-    (target) => target.tableName.trim().toLocaleLowerCase() === fileStem(fileName),
-  );
+  const matches = targets.filter((target) => target.tableName.trim().toLocaleLowerCase() === fileStem(fileName));
   if (matches.length !== 1) return undefined;
   const key = multiTableTargetKey(matches[0]);
   return unavailableTargetKeys.has(key) ? undefined : key;
@@ -97,15 +104,13 @@ export const reconcileMultiTableSourcesWithTargets = (
 ): MultiTableSourceDraft[] => {
   const validTargetKeys = new Set(targets.map(multiTableTargetKey));
   const unavailableTargetKeys = new Set(
-    sources
-      .map((source) => source.targetKey)
-      .filter((key): key is string => !!key && validTargetKeys.has(key)),
+    sources.map((source) => source.targetKey).filter((key): key is string => !!key && validTargetKeys.has(key)),
   );
   return sources.map((source) => {
     if (source.targetKey && validTargetKeys.has(source.targetKey)) return source;
     const targetKey = findAutomaticTargetKey(source.displayFileName, targets, unavailableTargetKeys);
     if (targetKey) unavailableTargetKeys.add(targetKey);
-    return source.targetKey === targetKey ? source : { ...source, targetKey };
+    return source.targetKey === targetKey ? source : updateSourceSelection(source, { targetKey });
   });
 };
 
@@ -136,10 +141,7 @@ export const normalizeLogicalDependencySequences = (
   });
 };
 
-export const getMultiTableSourceIssues = (
-  sources: MultiTableSourceDraft[],
-  validTargetKeys?: ReadonlySet<string>,
-) => {
+export const getMultiTableSourceIssues = (sources: MultiTableSourceDraft[], validTargetKeys?: ReadonlySet<string>) => {
   const targetKeys = sources.map((source) => source.targetKey).filter((key): key is string => !!key);
   const invalidTargets = validTargetKeys
     ? sources.filter((source) => !!source.targetKey && !validTargetKeys.has(source.targetKey))
@@ -154,14 +156,13 @@ export const getMultiTableSourceIssues = (
     ready:
       sources.length > 0 &&
       invalidTargets.length === 0 &&
-      sources.every((source) => source.status === 'READY' && !!source.fileId && !!source.targetKey),
+      sources.every(
+        (source) => source.status === 'READY' && !!source.fileId && !!source.targetKey && sourcePreviewReady(source),
+      ),
   };
 };
 
-export const getLogicalDependencyIssues = (
-  dependencies: LogicalDependencyDraft[],
-  validTargetKeys: Set<string>,
-) => {
+export const getLogicalDependencyIssues = (dependencies: LogicalDependencyDraft[], validTargetKeys: Set<string>) => {
   const complete = dependencies.filter(
     (dependency) =>
       dependency.parentTargetKey &&

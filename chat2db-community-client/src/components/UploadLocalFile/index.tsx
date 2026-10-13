@@ -161,6 +161,7 @@ const UploadLocalFile = forwardRef((props: IProps, ref: ForwardedRef<UploadLocal
   };
 
   const handleUpdate = () => {
+    if (rest.disabled) return;
     const fileTypeList =
       accept?.split(',').map((type) => {
         return type.replace('.', '');
@@ -192,6 +193,7 @@ const UploadLocalFile = forwardRef((props: IProps, ref: ForwardedRef<UploadLocal
                   type="text"
                   size="small"
                   icon={<Plus size={14} />}
+                  disabled={rest.disabled}
                   onClick={handleUpdate}
                 />
               ) : (
@@ -260,6 +262,7 @@ const UploadLocalFile = forwardRef((props: IProps, ref: ForwardedRef<UploadLocal
             type="button"
             className={cx(styles.uploadDragger, styles.desktopUploadDragger)}
             aria-label={description[0] || i18n('workspace.importExport.clickOrDrag')}
+            disabled={rest.disabled}
             onClick={handleUpdate}
           >
             <IconfontSvg className={styles.uploadDraggerIcon} size={36} code="icon-upload" />

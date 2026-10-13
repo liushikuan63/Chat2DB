@@ -1,4 +1,4 @@
-import { memo, type ReactNode, useEffect, useState } from 'react';
+import { memo, type ReactNode, useEffect, useRef, useState } from 'react';
 import { useStyles } from './style';
 import { IconButton, Empty, EmptyImage, staticMessage } from '@chat2db/ui';
 import { Progress, Spin, Tooltip } from 'antd';
@@ -13,7 +13,8 @@ import { ACTIVE_TASK_STATUSES, ImportExportTaskStatus } from '@/constants/import
 import dayjs from 'dayjs';
 import jcefApi from '@/jcef';
 import { isDesktop } from '@/utils/env';
-import { CircleCheck, CircleDashed, CircleX, Clock3, LoaderCircle, RotateCw, Trash2 } from 'lucide-react';
+import { CircleCheck, CircleDashed, CircleX, Clock3, LoaderCircle, RotateCw, Square, Trash2 } from 'lucide-react';
+import { requestTaskCancellation } from './cancellation';
 import { useGlobalStore } from '@/store/global';
 import type { ImportExportTaskDetails } from '@/typings/importExport';
 import PanelToolbar, { PANEL_TOOLBAR_BUTTON_SIZE } from '@/components/PanelToolbar';
@@ -67,6 +68,9 @@ interface TaskCenterProps {
 export default memo<TaskCenterProps>(({ headerLeading }) => {
   const { styles } = useStyles();
   const [now, setNow] = useState(() => Date.now());
+  const cancellationInFlight = useRef(new Set<number>());
+  const [cancellingTaskIds, setCancellingTaskIds] = useState<Set<number>>(new Set());
+  const [cancellationRequestedIds, setCancellationRequestedIds] = useState<Set<number>>(new Set());
   const [highlightedTaskIds] = useState<Set<number>>(
     () => new Set(useImportExportStore.getState().unreadCompletedTaskIds),
   );
@@ -123,6 +127,34 @@ export default memo<TaskCenterProps>(({ headerLeading }) => {
           removeTask(task.id);
           return getTaskList();
         }),
+    });
+  };
+
+  const handleCancelTask = (task: ImportExportTaskDetails) => {
+    openUnifiedConfirmationModal({
+      title: i18n('workspace.task.action.cancel'),
+      content: i18n('workspace.task.cancel.confirm'),
+      onOk: async () => {
+        if (cancellationInFlight.current.has(task.id)) return;
+        cancellationInFlight.current.add(task.id);
+        setCancellingTaskIds(new Set(cancellationInFlight.current));
+        try {
+          const state = await requestTaskCancellation(task.id, importExportServices);
+          if (state.cancellationRequested) {
+            setCancellationRequestedIds((ids) => new Set([...ids, task.id]));
+          } else if (state.reason === 'COMMIT_IN_PROGRESS' || state.reason === 'RECOVERY_IN_PROGRESS') {
+            staticMessage.info(i18n('workspace.task.cancel.unavailable'));
+          }
+        } catch (error) {
+          const failure = error as { errorMessage?: string; message?: string };
+          staticMessage.error(failure.errorMessage || failure.message || i18n('common.text.failure'));
+          throw error;
+        } finally {
+          cancellationInFlight.current.delete(task.id);
+          setCancellingTaskIds(new Set(cancellationInFlight.current));
+          void getTaskList();
+        }
+      },
     });
   };
 
@@ -234,6 +266,19 @@ export default memo<TaskCenterProps>(({ headerLeading }) => {
                           showInfo={false}
                         />
                         <span className={styles.taskProgressValue}>{progress}%</span>
+                      </div>
+                    )}
+                    {isActive && (
+                      <div className={styles.taskActions}>
+                        <IconButton
+                          icon={Square}
+                          title={i18n(cancellationRequestedIds.has(item.id)
+                            ? 'workspace.task.cancel.requested' : 'workspace.task.action.cancel')}
+                          tooltipPlacement="left"
+                          disabled={cancellingTaskIds.has(item.id) || cancellationRequestedIds.has(item.id)}
+                          size={{ boxSize: 18, iconSize: 13, borderRadius: 3 }}
+                          onClick={(event) => { event.stopPropagation(); handleCancelTask(item); }}
+                        />
                       </div>
                     )}
                     {isResumable && (

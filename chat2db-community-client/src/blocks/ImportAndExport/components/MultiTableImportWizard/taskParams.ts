@@ -1,3 +1,4 @@
+import { sourceCsvOptions } from './sourcePreview';
 import { DatabaseTypeCode } from '@/constants/common';
 import { ImportExportFileType, ImportExportTaskType } from '@/constants/importExport';
 import type { ImportTaskParams } from '@/service/importExport';
@@ -78,10 +79,7 @@ const DEFERRED_CONSTRAINT_DATABASE_TYPES = new Set<DatabaseTypeCode>([
   DatabaseTypeCode.KINGBASE,
 ]);
 
-const SEQUENCE_RESET_DATABASE_TYPES = new Set<DatabaseTypeCode>([
-  DatabaseTypeCode.POSTGRESQL,
-  DatabaseTypeCode.H2,
-]);
+const SEQUENCE_RESET_DATABASE_TYPES = new Set<DatabaseTypeCode>([DatabaseTypeCode.POSTGRESQL, DatabaseTypeCode.H2]);
 
 const TRANSACTIONAL_MAINTENANCE_DATABASE_TYPES = new Set<DatabaseTypeCode>([DatabaseTypeCode.POSTGRESQL]);
 
@@ -119,9 +117,8 @@ export const requestsAdvancedMultiTableImport = usesMultiTableStaging;
 const isIntegerInRange = (value: number | undefined, min: number, max?: number) =>
   Number.isInteger(value) && value! >= min && (max === undefined || value! <= max);
 
-export const hasValidMultiTableMaxErrors = (
-  settings: Pick<MultiTableImportSettings, 'onError' | 'maxErrors'>,
-) => settings.onError !== 'SKIP' || isIntegerInRange(settings.maxErrors, 1);
+export const hasValidMultiTableMaxErrors = (settings: Pick<MultiTableImportSettings, 'onError' | 'maxErrors'>) =>
+  settings.onError !== 'SKIP' || isIntegerInRange(settings.maxErrors, 1);
 
 export const getMultiTableOnErrorLabelKey = (onError: MultiTableImportSettings['onError']) =>
   onError === 'SKIP'
@@ -143,10 +140,7 @@ export const hasValidMultiTableNumericSettings = (settings: MultiTableImportSett
   hasValidMultiTableMaxErrors(settings) &&
   (!settings.rollbackOptions.rehearsal || isIntegerInRange(settings.performanceSamplePercent, 1, 100));
 
-export const hasCompatibleMultiTableSettings = (
-  settings: MultiTableImportSettings,
-  databaseType?: DatabaseTypeCode,
-) =>
+export const hasCompatibleMultiTableSettings = (settings: MultiTableImportSettings, databaseType?: DatabaseTypeCode) =>
   (!settings.rollbackOptions.fullRollback ||
     settings.rollbackOptions.rehearsal ||
     !anyEnabled(settings.finalizationOptions)) &&
@@ -287,7 +281,11 @@ export const buildMultiTableImportParams = ({
         fileId: source.fileId,
         displayFileName: source.displayFileName,
         format: MULTI_TABLE_IMPORT_FORMAT,
-        unmappedTarget: 'DEFAULT',
+        csvOptions: sourceCsvOptions(source),
+        columnMappings: Object.entries(source.columnMappings || {})
+          .filter((entry): entry is [string, string] => !!entry[1])
+          .map(([sourceColumn, targetColumn]) => ({ sourceColumn, targetColumn })),
+        unmappedTarget: source.unmappedTarget || 'DEFAULT',
         options:
           settings.onError === 'SKIP' ? { onError: 'SKIP', maxErrors: settings.maxErrors } : { onError: 'ABORT' },
       };
