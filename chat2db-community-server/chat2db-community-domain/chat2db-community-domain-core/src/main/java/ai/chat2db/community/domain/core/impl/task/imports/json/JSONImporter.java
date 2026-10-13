@@ -44,11 +44,12 @@ public class JSONImporter extends BaseImporter {
         for (int index = 0; index < names.size(); index++) {
             header.put(index, names.get(index));
         }
-        builder.acceptHead(header);
         Map<String, Integer> targetIndexByName = targetIndexByName(header);
+        builder.acceptHead(header);
         List<String> batch = new ArrayList<>(BATCH_SIZE);
         JsonImportReader.read(new File(spec.getSourceFile()), options, Integer.MAX_VALUE,
                 (Map<String, ImportCell> record, Integer rowNumber) -> {
+            requireUniqueKeys(record.keySet(), "row " + rowNumber);
             requireKnownKeys(record.keySet(), targetIndexByName.keySet(), rowNumber);
             Map<Integer, ImportCell> cells = new LinkedHashMap<>();
             record.forEach((key, value) -> {
@@ -68,9 +69,23 @@ public class JSONImporter extends BaseImporter {
 
     /** Normalized target column name -> its position in the header the row builder works with. */
     static Map<String, Integer> targetIndexByName(Map<Integer, String> header) {
+        requireUniqueKeys(header.values(), "header (before row 1)");
         Map<String, Integer> index = new TreeMap<>();
         header.forEach((position, name) -> index.put(normalizeKey(name), position));
         return index;
+    }
+
+    /** Validate raw names before normalization can discard either source value or header position. */
+    private static void requireUniqueKeys(Iterable<String> names, String location) {
+        Map<String, String> rawNameByNormalized = new LinkedHashMap<>();
+        for (String name : names) {
+            String normalized = normalizeKey(name);
+            if (rawNameByNormalized.containsKey(normalized)) {
+                throw new ParamBusinessException("Ambiguous JSON keys at " + location + ": '"
+                        + rawNameByNormalized.get(normalized) + "' and '" + name + "'");
+            }
+            rawNameByNormalized.put(normalized, name);
+        }
     }
 
     static String normalizeKey(String key) {
