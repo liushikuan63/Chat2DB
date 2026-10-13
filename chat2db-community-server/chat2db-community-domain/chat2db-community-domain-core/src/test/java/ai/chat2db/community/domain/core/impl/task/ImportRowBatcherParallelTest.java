@@ -3,6 +3,7 @@ package ai.chat2db.community.domain.core.impl.task;
 import ai.chat2db.community.domain.api.config.DBConfig;
 import ai.chat2db.community.domain.api.config.DriverConfig;
 import ai.chat2db.community.domain.api.model.PageResponse;
+import ai.chat2db.community.domain.api.model.task.ArtifactDraft;
 import ai.chat2db.community.domain.api.model.task.ImportColumnMapping;
 import ai.chat2db.community.domain.api.model.task.ImportOptions;
 import ai.chat2db.community.domain.api.model.task.ImportTaskSpec;
@@ -13,6 +14,7 @@ import ai.chat2db.community.domain.api.model.task.TaskEvent;
 import ai.chat2db.community.domain.api.model.task.TaskQuery;
 import ai.chat2db.community.domain.api.model.task.TaskStatusPatch;
 import ai.chat2db.community.domain.api.model.task.TaskTargetSnapshot;
+import ai.chat2db.community.domain.api.model.task.TaskCancelledException;
 import ai.chat2db.community.domain.api.service.task.TaskStorage;
 import ai.chat2db.community.domain.api.model.task.TaskProgress;
 import ai.chat2db.community.domain.core.impl.task.imports.excel.CSVImporter;
@@ -45,6 +47,7 @@ import java.util.List;
 import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import ai.chat2db.community.domain.core.impl.task.ArtifactServiceImpl;
 
@@ -257,6 +260,79 @@ class ImportRowBatcherParallelTest {
 
         List<Integer> ids = importedIds();
         assertEquals(List.of(1, 2, 3), ids, "the isolated duplicate row is rejected, others imported");
+    }
+
+    /**
+     * A cancellation that lands while SKIP replay is running must abort the import. Rows abandoned
+     * because the task was cancelled are not rejected rows: only the genuinely bad row may reach the
+     * reject file, and the rows at or after the cancellation point must not be imported. The fixture
+     * asks for the cancellation through the real task token as soon as the first row is recorded in
+     * the reject file, which is what a user cancelling a running import does.
+     */
+    @Test
+    void cancellationDuringSkipReplayIsNotRecordedAsARejectedRow() throws Exception {
+        System.setProperty(PARALLELISM_PROPERTY, "1");
+        Path csv = writeCsv("1,ok", "1,duplicate", "3,ok", "4,ok", "5,ok");
+        ImportTaskSpec spec = csvSpec(csv, "SKIP");
+        Long taskId = storage.create(Task.builder().type("DATA_FILE_IMPORT").name("import")
+                .target(spec.getTarget()).build(), TaskEvent.builder()
+                .level("INFO").code("TASK_CREATED").message("created").build()).getId();
+        RunningTask runningTask = new RunningTask(taskId, () -> { });
+        TaskExecutionContextImpl context = new TaskExecutionContextImpl(taskId, runningTask,
+                cancelOnRejectedRowEvent(runningTask), new ArtifactServiceImpl());
+
+        try {
+            assertThrows(TaskCancelledException.class, () -> new CSVImporter().run(spec, context));
+        } finally {
+            context.closeQuietly();
+        }
+
+        assertEquals(1, rejectedRowLines(context),
+                "only the genuinely bad row may be written to the reject file");
+        assertEquals(1L, rejectedRowEvents(), "the cancellation must not add a rejected-row event");
+        assertEquals(List.of(1), importedIds(), "rows at or after the cancellation are not imported");
+    }
+
+    /** Lines the run wrote into its reject artifact: the user-visible record of skipped rows. */
+    private long rejectedRowLines(TaskExecutionContextImpl context) throws Exception {
+        long lines = 0L;
+        for (ArtifactDraft draft : context.artifactDrafts()) {
+            if ("REJECT".equals(draft.getRole())) {
+                lines += Files.readAllLines(draft.getTemporaryFile().toPath()).size();
+            }
+        }
+        return lines;
+    }
+
+    private long rejectedRowEvents() {
+        return storage.events.stream()
+                .filter(event -> "IMPORT_ROW_REJECTED".equals(event.getCode()))
+                .count();
+    }
+
+    /**
+     * Controlled cancellation fixture: the task token is cancelled right after the first rejected
+     * row has been persisted, so the cancellation lands during SKIP replay rather than around it.
+     */
+    private TaskStorage cancelOnRejectedRowEvent(RunningTask runningTask) {
+        return (TaskStorage) java.lang.reflect.Proxy.newProxyInstance(getClass().getClassLoader(),
+                new Class<?>[]{TaskStorage.class}, (proxy, method, args) -> {
+                    Object result = invoke(method, storage, args);
+                    if ("appendEvent".equals(method.getName()) && args != null && args.length == 1
+                            && args[0] instanceof TaskEvent event
+                            && "IMPORT_ROW_REJECTED".equals(event.getCode())) {
+                        runningTask.requestCancellation(true);
+                    }
+                    return result;
+                });
+    }
+
+    private static Object invoke(java.lang.reflect.Method method, Object target, Object[] args) throws Throwable {
+        try {
+            return method.invoke(target, args);
+        } catch (java.lang.reflect.InvocationTargetException failure) {
+            throw failure.getCause();
+        }
     }
 
     /**

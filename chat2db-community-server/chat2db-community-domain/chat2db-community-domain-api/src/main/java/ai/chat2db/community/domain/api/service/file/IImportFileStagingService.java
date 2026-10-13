@@ -7,6 +7,11 @@ import java.io.File;
  */
 public interface IImportFileStagingService {
 
+    /** Current enforced staging limits; legacy implementations may not advertise capabilities. */
+    default ai.chat2db.community.domain.api.model.task.ImportStagingLimits uploadLimits() {
+        throw new UnsupportedOperationException("Import upload capabilities unavailable");
+    }
+
     /** Copies a validated upload into server-managed staging and returns its opaque ID. */
     String stage(File file, String originalFileName);
 

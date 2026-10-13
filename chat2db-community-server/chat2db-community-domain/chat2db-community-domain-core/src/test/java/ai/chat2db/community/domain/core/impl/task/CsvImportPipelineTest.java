@@ -18,6 +18,7 @@ import ai.chat2db.community.domain.api.model.task.TaskStatusPatch;
 import ai.chat2db.community.domain.api.model.task.TaskTargetSnapshot;
 import ai.chat2db.community.domain.api.service.task.TaskStorage;
 import ai.chat2db.community.domain.core.impl.task.imports.excel.CSVImporter;
+import ai.chat2db.community.domain.core.impl.task.imports.ImportTaskSourceSupport;
 import ai.chat2db.spi.DefaultMetaService;
 import ai.chat2db.spi.IDbMetaData;
 import ai.chat2db.spi.IPlugin;
@@ -48,6 +49,41 @@ import ai.chat2db.community.domain.core.impl.task.ArtifactServiceImpl;
  * with a REJECT sub-artifact, and true batched inserts against the target table.
  */
 class CsvImportPipelineTest {
+
+    @Test
+    void multiTableSourceRetainsItsCsvOptionsAcrossPersistenceAndExecution() throws Exception {
+        Path file = tempDirectory.resolve("independent.csv");
+        Files.writeString(file, "intro\nKEY;NAME\n99;outside\n1;中文\n2;fine\n3;outside\n",
+                StandardCharsets.UTF_8);
+        var mapper = new com.fasterxml.jackson.databind.ObjectMapper()
+                .configure(com.fasterxml.jackson.databind.DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false);
+        var source = mapper.convertValue(Map.of(
+                "tableName", "TARGET_ROWS", "sourceFile", file.toString(), "format", "CSV",
+                "csvOptions", Map.of("delimiter", ";", "encoding", "UTF-8", "hasHeader", true,
+                        "headerRow", 2, "dataStartRow", 4, "dataEndRow", 5),
+                "columnMappings", List.of(Map.of("sourceColumn", "KEY", "targetColumn", "ID"),
+                        Map.of("sourceColumn", "NAME", "targetColumn", "NAME"))),
+                ai.chat2db.community.domain.api.model.task.ImportTableSource.class);
+        ImportTaskSpec parent = ImportTaskSpec.builder().taskType("DATA_FILE_IMPORT").scope("TABLE")
+                .target(TaskTargetSnapshot.builder().dataSourceId(1L).tableName("TARGET_ROWS").build())
+                .format("CSV").mode("STANDARD").tableSources(List.of(source))
+                .csvOptions(ai.chat2db.community.domain.api.model.task.CsvOptions.builder().delimiter(",").build())
+                .build();
+        var reloaded = mapper.readValue(mapper.writeValueAsBytes(parent), ImportTaskSpec.class);
+        var effective = ImportTaskSourceSupport.specForSource(reloaded,
+                ImportTaskSourceSupport.effectiveSources(reloaded).get(0));
+        new CSVImporter().run(effective, createContext(effective));
+        try (Statement statement = connection.createStatement();
+             ResultSet rows = statement.executeQuery("SELECT ID, NAME FROM TARGET_ROWS ORDER BY ID")) {
+            assertTrue(rows.next());
+            assertEquals(1, rows.getInt(1));
+            assertEquals("中文", rows.getString(2));
+            assertTrue(rows.next());
+            assertEquals(2, rows.getInt(1));
+            assertEquals("fine", rows.getString(2));
+            org.junit.jupiter.api.Assertions.assertFalse(rows.next());
+        }
+    }
 
     private static final String DB_TYPE = "CSV_IMPORT_TEST";
 

@@ -9,6 +9,7 @@ import ai.chat2db.community.domain.api.model.task.TaskArtifact;
 import ai.chat2db.community.domain.api.model.task.TaskDownload;
 import ai.chat2db.community.domain.api.model.task.TaskEvent;
 import ai.chat2db.community.domain.api.model.task.TaskQuery;
+import ai.chat2db.community.domain.api.model.task.TaskControlState;
 
 import java.util.List;
 
@@ -37,6 +38,12 @@ public interface TaskService {
      * @return the task id being resumed
      */
     Long resume(Long taskId);
+
+    /** Request cancellation without promising to roll back any previously committed prefix. */
+    TaskControlState cancel(Long taskId);
+
+    /** Current control capability; safe pause is unsupported until checkpoint retention is proven. */
+    TaskControlState control(Long taskId);
 
     PageResponse<Task> list(TaskQuery query);
 

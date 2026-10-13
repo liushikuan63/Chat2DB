@@ -99,6 +99,7 @@ public final class ImportTaskSourceSupport {
                 .unmappedTarget(source.getUnmappedTarget() == null
                         ? parent.getUnmappedTarget() : source.getUnmappedTarget())
                 .options(source.getOptions() == null ? parent.getOptions() : source.getOptions())
+                .csvOptions(source.getCsvOptions() == null ? parent.getCsvOptions() : source.getCsvOptions())
                 .mode(parent.getMode())
                 .confirmedNoStrongRelations(parent.getConfirmedNoStrongRelations())
                 .build();
@@ -129,6 +130,7 @@ public final class ImportTaskSourceSupport {
                 .columnMappings(spec.getColumnMappings())
                 .unmappedTarget(spec.getUnmappedTarget())
                 .options(spec.getOptions())
+                .csvOptions(spec.getCsvOptions())
                 .build();
     }
 
@@ -151,6 +153,7 @@ public final class ImportTaskSourceSupport {
                 .columnMappings(source.getColumnMappings())
                 .unmappedTarget(source.getUnmappedTarget())
                 .options(source.getOptions())
+                .csvOptions(source.getCsvOptions())
                 .build();
     }
 
@@ -209,6 +212,8 @@ public final class ImportTaskSourceSupport {
         }
         boolean thirdParty = "THIRD_PARTY".equalsIgnoreCase(StringUtils.trimToEmpty(spec.getSourceKind()));
         for (ImportTableSource source : sources) {
+            var csvOptions = source.getCsvOptions() == null ? spec.getCsvOptions() : source.getCsvOptions();
+            if (csvOptions != null) csvOptions.validate();
             ImportOptions options = source.getOptions() == null ? spec.getOptions() : source.getOptions();
             validateSqlExporterProfile(spec.getSourceKind(), options, thirdParty && isSqlSource(spec, source));
             if (options != null) {
