@@ -18,6 +18,7 @@ import ai.chat2db.spi.DefaultSQLExecutor;
 import ai.chat2db.spi.util.ResultSetUtils;
 import com.alibaba.excel.EasyExcel;
 import com.alibaba.excel.ExcelWriter;
+import com.alibaba.excel.write.builder.ExcelWriterBuilder;
 import com.alibaba.excel.support.ExcelTypeEnum;
 import com.alibaba.excel.write.metadata.WriteSheet;
 import lombok.extern.slf4j.Slf4j;
@@ -25,6 +26,7 @@ import org.apache.poi.ss.SpreadsheetVersion;
 
 import java.io.File;
 import java.lang.reflect.Field;
+import java.nio.charset.StandardCharsets;
 import java.sql.Connection;
 import java.sql.ResultSet;
 import java.sql.ResultSetMetaData;
@@ -84,7 +86,12 @@ public abstract class BaseExcelExporter extends BaseExporter {
     private void writeExcelData(ResultSet resultSet, ExcelTypeEnum excelType, File file, String sheetName,
             ExportTaskSpec spec, SqlExecutionPlan executionPlan, TaskExecutionContext context,
             ExportProgressLogger progressLogger) {
-        try (ExcelWriter excelWriter = EasyExcel.write(file).excelType(excelType).build()) {
+        ExcelWriterBuilder writer = EasyExcel.write(file).excelType(excelType);
+        if (excelType == ExcelTypeEnum.CSV) {
+            // CSV must round-trip across hosts, including Java 17 Windows with a GBK default.
+            writer.charset(StandardCharsets.UTF_8);
+        }
+        try (ExcelWriter excelWriter = writer.build()) {
             ResultSetMetaData metaData = resultSet.getMetaData();
             List<Integer> includedColumnIndexes = includedColumnIndexes(metaData, executionPlan);
             IValueProcessor valueProcessor = Chat2DBContext.getDbMetaData().getValueProcessor();
