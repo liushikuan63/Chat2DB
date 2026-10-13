@@ -1,4 +1,5 @@
 import createRequest from './base';
+import type { ImportUploadCapabilities } from '@/utils/importUploadLimits';
 import type { IExcelOptions, IJsonOptions, ICsvOptions } from '@/typings/importExport';
 import { ImportUnmappedTarget } from '@/constants/importExport';
 import {
@@ -471,10 +472,19 @@ const uploadImportFile = createRequest<{ file: File }, string>('/api/rdb/import_
   contentType: 'formData',
 });
 
+const getImportUploadCapabilities = createRequest<Record<string, never>, ImportUploadCapabilities>(
+  '/api/rdb/import_preview/capabilities', { method: 'get', errorLevel: false },
+);
+
 const stageDesktopImportFile = createRequest<{ sourceFile: string; originalFileName: string }, string>(
   '/api/rdb/import_preview/upload_local',
   { method: 'post' },
 );
+
+const releaseImportFile = createRequest<{ fileId: string }, void>('/api/rdb/import_preview/release', {
+  method: 'post',
+  errorLevel: false,
+});
 
 const getImportPreview = createRequest<
   {
@@ -634,7 +644,9 @@ export default {
   getImportSheets,
   executeImportWithMapping,
   uploadImportFile,
+  getImportUploadCapabilities,
   stageDesktopImportFile,
+  releaseImportFile,
   getActiveTransactionList,
   getDataSourceList,
 };
