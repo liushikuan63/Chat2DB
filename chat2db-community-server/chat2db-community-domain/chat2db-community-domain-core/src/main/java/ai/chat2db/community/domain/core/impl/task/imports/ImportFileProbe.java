@@ -1,5 +1,8 @@
 package ai.chat2db.community.domain.core.impl.task.imports;
 
+import ai.chat2db.community.domain.api.model.task.CsvOptions;
+import ai.chat2db.community.domain.api.model.task.ImportOptions;
+import ai.chat2db.community.domain.api.model.task.ImportTaskSpec;
 import cn.hutool.core.io.CharsetDetector;
 import org.apache.commons.csv.CSVFormat;
 import org.apache.commons.csv.CSVParser;
@@ -16,6 +19,9 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.LinkedHashMap;
+import java.util.Map;
+import java.util.Objects;
 
 /**
  * Format detection for import sources. The charset detector is the same one the desktop text
@@ -28,6 +34,42 @@ public final class ImportFileProbe {
     private static final int SAMPLE_ROWS = 20;
 
     private ImportFileProbe() {
+    }
+
+    /** Explicit legacy CSV settings win; the task wizard supplies the newer ImportOptions. */
+    public static CsvOptions effectiveCsvOptions(ImportTaskSpec spec) {
+        if (spec.getCsvOptions() != null) {
+            return spec.getCsvOptions().validate();
+        }
+        CsvOptions settings = CsvOptions.defaults();
+        ImportOptions options = spec.getOptions();
+        if (options == null) {
+            return settings.validate();
+        }
+        File source = new File(spec.getSourceFile());
+        Charset charset = effectiveCharset(source, options.getCharset());
+        try {
+            settings.setEncoding(charset.name());
+            settings.setDelimiter(String.valueOf(delimiterChar(options.getDelimiter(), charset, source)));
+        } catch (IOException failure) {
+            throw new ai.chat2db.community.tools.exception.BusinessException(
+                    "task.import.preview.failed", null, failure);
+        }
+        String quote = String.valueOf(quoteChar(options.getQuoteChar()));
+        settings.setQuote(quote);
+        settings.setEscape(quote);
+        settings.setDataStartRow(Math.addExact(2,
+                options.getSkipRows() == null ? 0 : Math.max(0, options.getSkipRows())));
+        return settings.validate();
+    }
+
+    public static Map<Integer, String> normalizeNullLiteral(Map<Integer, String> row, String nullString) {
+        if (nullString == null) {
+            return row;
+        }
+        Map<Integer, String> normalized = new LinkedHashMap<>();
+        row.forEach((index, value) -> normalized.put(index, Objects.equals(value, nullString) ? null : value));
+        return normalized;
     }
 
     public static Charset detectCharset(File file) {

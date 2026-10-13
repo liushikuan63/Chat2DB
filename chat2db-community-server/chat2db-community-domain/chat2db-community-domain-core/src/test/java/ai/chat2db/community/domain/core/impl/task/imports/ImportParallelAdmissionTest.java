@@ -21,6 +21,58 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class ImportParallelAdmissionTest {
 
+    @Test
+    void typedCsvAdmissionUsesSelectedHeaderAndRangeForMappingAndThreshold() throws Exception {
+        useOneUnitThresholds();
+        ImportTaskSpec spec = csvSpec("preamble\nID;NAME\n99;ignored\n1;selected\n2;outside\n", true, true);
+        var options = ai.chat2db.community.domain.api.model.task.CsvOptions.defaults();
+        options.setDelimiter(";"); options.setHeaderRow(2); options.setDataStartRow(4); options.setDataEndRow(4);
+        spec.setCsvOptions(options);
+        ImportAdmissionReport report = ImportParallelAdmission.assess(spec, columns());
+        assertEquals("PARALLEL_SAFE", report.getVerdict());
+        assertTrue(report.isFullScan()); assertEquals(1, report.getDataRows());
+        System.setProperty("chat2db.task.import.parallel.min-rows", "2");
+        report = ImportParallelAdmission.assess(spec, columns());
+        assertEquals("STANDARD", report.getEffectiveMode());
+        assertTrue(hasFinding(report, "G0", "DEGRADATION"));
+        assertFalse(hasFinding(report, "D2", "BLOCKER"));
+    }
+
+    @Test
+    void typedCsvAdmissionKeepsMalformedAndMultilineBlockersAndPropagatesCancellation() throws Exception {
+        useOneUnitThresholds();
+        ImportTaskSpec spec = csvSpec("ID;NAME\n1;\"line\nnext\"\n", true, true);
+        var options = ai.chat2db.community.domain.api.model.task.CsvOptions.defaults();
+        options.setDelimiter(";"); spec.setCsvOptions(options);
+        assertTrue(hasFinding(ImportParallelAdmission.assess(spec, columns()), "C3", "BLOCKER"));
+        Files.writeString(Path.of(spec.getSourceFile()), "ID;NAME\n1;\"unclosed\n");
+        ImportAdmissionReport malformed = ImportParallelAdmission.assess(spec, columns());
+        assertTrue(hasFinding(malformed, "D1", "BLOCKER")); assertFalse(malformed.isFullScan());
+        assertEquals(-1, malformed.getDataRows());
+        Files.writeString(Path.of(spec.getSourceFile()), "ID;NAME\n1;valid\n");
+        Thread.currentThread().interrupt();
+        try {
+            org.junit.jupiter.api.Assertions.assertThrows(java.util.concurrent.CancellationException.class,
+                    () -> ImportParallelAdmission.assess(spec, columns()));
+        } finally { Thread.interrupted(); }
+    }
+
+    @Test
+    void typedEncodingAndHeaderlessMappingOverrideLegacyHints() throws Exception {
+        useOneUnitThresholds();
+        ImportTaskSpec spec = csvSpec("unused", true, true);
+        Files.writeString(Path.of(spec.getSourceFile()), "1|中文\n2|outside\n", StandardCharsets.UTF_16LE);
+        var options = ai.chat2db.community.domain.api.model.task.CsvOptions.defaults();
+        options.setEncoding("UTF-16LE"); options.setDelimiter("|"); options.setHasHeader(false);
+        options.setDataStartRow(1); options.setDataEndRow(1); spec.setCsvOptions(options);
+        spec.setColumnMappings(List.of(new ImportColumnMapping("column_1", "ID"),
+                new ImportColumnMapping("column_2", "NAME")));
+        ImportAdmissionReport report = ImportParallelAdmission.assess(spec, columns());
+        assertTrue(report.isFullScan()); assertEquals(1, report.getDataRows());
+        assertFalse(hasFinding(report, "D1", "BLOCKER"));
+        assertFalse(hasFinding(report, "D2", "BLOCKER"));
+    }
+
     @TempDir
     Path tempDirectory;
 

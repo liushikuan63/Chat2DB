@@ -16,6 +16,7 @@ import org.springframework.stereotype.Service;
 import java.io.File;
 import java.io.IOException;
 import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.List;
 import java.util.Objects;
 
@@ -49,7 +50,7 @@ public class TaskDeletionServiceImpl implements TaskDeletionService {
             PendingTaskDeletion deletion = pending.stream()
                     .filter(entry -> Objects.equals(entry.getTaskId(), task.getId())).findFirst().orElse(null);
             if (deletion == null) {
-                deletion = PendingTaskDeletion.create(task);
+                deletion = PendingTaskDeletion.create(task, storage.listArtifacts(task.getId()));
                 pending.add(deletion);
             }
             if (!attemptDeletion(pending, deletion)) {
@@ -101,29 +102,43 @@ public class TaskDeletionServiceImpl implements TaskDeletionService {
     private void executeDeletion(PendingTaskDeletion deletion) throws IOException {
         if (storage.get(deletion.getTaskId()).isPresent()) {
             if (deletion.hasArtifact()) {
-                artifacts.stageForDeletion(deletion.originalFile(), deletion.stagedFile());
+                List<Path> originals = deletion.originalFiles();
+                List<Path> staged = deletion.stagedFiles();
+                for (int index = 0; index < staged.size(); index++) {
+                    artifacts.stageForDeletion(originals.get(index), staged.get(index));
+                }
             }
             if (!storage.deleteTerminalTask(deletion.getTaskId(), null)) {
                 throw new IOException("Task is not terminal: " + deletion.getTaskId());
             }
         }
-        // The original filename may now belong to a newer export; only delete the staged file.
-        if (deletion.hasArtifact()) {
-            Files.deleteIfExists(deletion.stagedFile());
+        // The original filenames may now belong to newer exports; only delete the staged copies.
+        for (Path stagedFile : deletion.stagedFiles()) {
+            Files.deleteIfExists(stagedFile);
         }
     }
 
     private boolean isComplete(PendingTaskDeletion deletion) {
-        return storage.get(deletion.getTaskId()).isEmpty()
-                && (!deletion.hasArtifact() || Files.notExists(deletion.stagedFile()));
+        if (storage.get(deletion.getTaskId()).isPresent()) {
+            return false;
+        }
+        for (Path stagedFile : deletion.stagedFiles()) {
+            if (Files.notExists(stagedFile)) {
+                continue;
+            }
+            return false;
+        }
+        return true;
     }
 
     @Override
     public synchronized File resolveArtifact(Task task) {
         for (PendingTaskDeletion deletion : readQueue()) {
-            if (Objects.equals(task.getId(), deletion.getTaskId()) && deletion.hasArtifact()
-                    && Files.exists(deletion.stagedFile())) {
-                return deletion.stagedFile().toFile();
+            if (Objects.equals(task.getId(), deletion.getTaskId())) {
+                Path primary = deletion.primaryStagedFile();
+                if (primary != null && Files.exists(primary)) {
+                    return primary.toFile();
+                }
             }
         }
         return new File(task.getArtifactId());

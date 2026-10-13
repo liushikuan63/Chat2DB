@@ -23,6 +23,14 @@ public final class ImportSqlExecutor {
 
     private final boolean batchInserts;
 
+    private int completedSequentialStatements;
+
+    /**
+     * Script-level transaction state. A script that issued {@code BEGIN} owns the transaction, so
+     * insert batches must not commit behind its back.
+     */
+    private final SqlTransactionScope transactionScope = new SqlTransactionScope();
+
     private final java.util.concurrent.atomic.AtomicLong importedStatementCount = new java.util.concurrent.atomic.AtomicLong();
     private final AtomicInteger batchSequence = new AtomicInteger();
 
@@ -35,7 +43,21 @@ public final class ImportSqlExecutor {
         this.batchInserts = batchInserts;
     }
 
+    /**
+     * Whether insert batches may run their own transaction. False as soon as the script opened one,
+     * so a script {@code ROLLBACK} still discards everything it inserted.
+     */
+    boolean managesOwnTransaction() {
+        return !transactionScope.isOpen();
+    }
+
+    /** Package-private seam: records a statement the script executed so the scope stays accurate. */
+    void observeExecutedStatement(String executedSql) {
+        transactionScope.observe(executedSql);
+    }
+
     public void executeBatch(List<String> sqls) {
+        completedSequentialStatements = 0;
         if (CollectionUtils.isEmpty(sqls)) {
             return;
         }
@@ -85,6 +107,11 @@ public final class ImportSqlExecutor {
         }
     }
 
+    /** Successful prefix of the last sequential batch; transactional batches always return zero. */
+    public int completedSequentialStatements() {
+        return completedSequentialStatements;
+    }
+
     static TaskExecutionException importFailure(Exception error) {
         SQLException firstSqlError = null;
         for (Throwable cause = error; cause != null; cause = cause.getCause()) {
@@ -124,8 +151,15 @@ public final class ImportSqlExecutor {
             return;
         }
         context.checkCancelled();
-        DefaultSQLExecutor.getInstance().executeBatchInsert(
-                Chat2DBContext.getConnection(), List.copyOf(inserts), context, context::checkCancelled);
+        if (managesOwnTransaction()) {
+            DefaultSQLExecutor.getInstance().executeBatchInsert(
+                    Chat2DBContext.getConnection(), List.copyOf(inserts), context, context::checkCancelled);
+        } else {
+            // The script owns the transaction: adding its INSERTs must not commit or roll back,
+            // otherwise the script's own COMMIT/ROLLBACK decision is lost.
+            DefaultSQLExecutor.getInstance().executeJdbcBatchInsert(
+                    Chat2DBContext.getConnection(), List.copyOf(inserts), context, context::checkCancelled);
+        }
         inserts.clear();
     }
 
@@ -133,6 +167,10 @@ public final class ImportSqlExecutor {
         context.checkCancelled();
         DefaultSQLExecutor.getInstance().execute(
                 Chat2DBContext.getConnection(), sql, context, context::checkCancelled);
+        if (!batchInserts && Chat2DBContext.getConnection().getAutoCommit()) {
+            completedSequentialStatements++;
+        }
         context.checkCancelled();
+        observeExecutedStatement(sql);
     }
 }

@@ -2,11 +2,14 @@ package ai.chat2db.community.domain.api.service.task;
 
 import ai.chat2db.community.domain.api.model.PageResponse;
 import ai.chat2db.community.domain.api.model.task.ExportTaskSpec;
+import ai.chat2db.community.domain.api.model.task.ImportPreview;
 import ai.chat2db.community.domain.api.model.task.ImportTaskSpec;
 import ai.chat2db.community.domain.api.model.task.Task;
+import ai.chat2db.community.domain.api.model.task.TaskArtifact;
 import ai.chat2db.community.domain.api.model.task.TaskDownload;
 import ai.chat2db.community.domain.api.model.task.TaskEvent;
 import ai.chat2db.community.domain.api.model.task.TaskQuery;
+import ai.chat2db.community.domain.api.model.task.TaskControlState;
 
 import java.util.List;
 
@@ -15,6 +18,32 @@ public interface TaskService {
     Long submitExport(ExportTaskSpec spec);
 
     Long submitImport(ImportTaskSpec spec);
+
+    /**
+     * Returns an existing import task for the current owner and client submission key, rejecting
+     * reuse of that key for a different canonical import request.
+     */
+    Long findImportTaskId(String clientSubmissionId, String clientSubmissionFingerprint);
+
+    /**
+     * Parses the import source and resolves its columns against the target table without writing
+     * anything, so the UI can show the mapping and sample rows before submission.
+     */
+    ImportPreview previewImport(ImportTaskSpec spec);
+
+    /**
+     * Re-runs an interrupted task that startup reconciliation marked resumable, using the persisted
+     * spec and the connection context of the current request.
+     *
+     * @return the task id being resumed
+     */
+    Long resume(Long taskId);
+
+    /** Request cancellation without promising to roll back any previously committed prefix. */
+    TaskControlState cancel(Long taskId);
+
+    /** Current control capability; safe pause is unsupported until checkpoint retention is proven. */
+    TaskControlState control(Long taskId);
 
     PageResponse<Task> list(TaskQuery query);
 
@@ -33,4 +62,8 @@ public interface TaskService {
     void abortUserExit();
 
     TaskDownload resolveArtifact(Long taskId);
+
+    TaskDownload resolveArtifact(Long taskId, String artifactId);
+
+    List<TaskArtifact> listArtifacts(Long taskId);
 }

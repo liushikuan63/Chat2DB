@@ -35,6 +35,9 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import ai.chat2db.community.domain.core.impl.task.ArtifactServiceImpl;
+import ai.chat2db.community.domain.api.model.task.ResumeState;
+import ai.chat2db.community.domain.api.model.task.TaskArtifact;
 
 class TaskDeletionServiceImplTest {
     @TempDir
@@ -59,6 +62,28 @@ class TaskDeletionServiceImplTest {
         }
         assertTrue(storage.get(1L).isEmpty());
         assertFalse(Files.exists(artifact));
+    }
+
+    @Test
+    void everyArtifactOfATaskIsRemovedNotOnlyThePrimaryOne() throws IOException {
+        Path primary = Files.writeString(tempDirectory.resolve("orders.csv"), "rows");
+        Path rejects = Files.writeString(tempDirectory.resolve("orders-rejects.csv"), "rejected rows");
+        Path report = Files.writeString(tempDirectory.resolve("orders-report.json"), "{}");
+        Path neighbour = Files.writeString(tempDirectory.resolve("other.csv"), "not this task");
+        RecordingTaskStorage storage = storage(1L, primary);
+        storage.artifacts.put(1L, List.of(
+                TaskArtifact.builder().artifactId(primary.toString()).role("OUTPUT").build(),
+                TaskArtifact.builder().artifactId(rejects.toString()).role("REJECT").build(),
+                TaskArtifact.builder().artifactId(report.toString()).role("IMPORT_REPORT").build()));
+
+        tasks(storage).delete(1L);
+
+        assertTrue(storage.get(1L).isEmpty());
+        assertFalse(Files.exists(primary), "the primary artifact must be deleted");
+        assertFalse(Files.exists(rejects), "a reject summary must not be left behind");
+        assertFalse(Files.exists(report), "an import report must not be left behind");
+        assertTrue(Files.exists(neighbour), "an unrelated file must survive");
+        assertEquals("[]", Files.readString(journalFile().toPath()));
     }
 
     @Test
@@ -393,7 +418,8 @@ class TaskDeletionServiceImplTest {
     }
 
     private TaskServiceImpl tasks(RecordingTaskStorage storage) {
-        return new TaskServiceImpl(storage, null, new TaskDeletionServiceImpl(storage, new ArtifactServiceImpl(), journalFile()));
+        return new TaskServiceImpl(storage, null, new ArtifactServiceImpl(), null, null,
+                new TaskDeletionServiceImpl(storage, new ArtifactServiceImpl(), journalFile()));
     }
 
     private Task task(Long id, Path artifact) {
@@ -408,8 +434,14 @@ class TaskDeletionServiceImplTest {
     }
 
     private PendingTaskDeletion intent(Long id, Path artifact, int attempts) {
-        return new PendingTaskDeletion(id, artifact.toString(),
-                artifact.resolveSibling("." + artifact.getFileName() + ".task-delete-" + id).toString(), attempts, null);
+        // Written the way an earlier release did: one original and one staged path.
+        PendingTaskDeletion pending = new PendingTaskDeletion();
+        pending.setTaskId(id);
+        pending.setOriginalPath(artifact.toString());
+        pending.setStagedPath(artifact.resolveSibling("." + artifact.getFileName() + ".task-delete-" + id)
+                .toString());
+        pending.setAttempts(attempts);
+        return pending;
     }
 
     private void writeQueue(PendingTaskDeletion... pending) throws IOException {
@@ -422,6 +454,43 @@ class TaskDeletionServiceImplTest {
     }
 
     private static final class RecordingTaskStorage implements TaskStorage {
+        private final Map<Long, List<TaskArtifact>> artifacts = new LinkedHashMap<>();
+
+        @Override
+        public void saveArtifact(Long taskId, TaskArtifact artifact) {
+            artifacts.computeIfAbsent(taskId, key -> new java.util.ArrayList<>()).add(artifact);
+        }
+
+        @Override
+        public List<TaskArtifact> listArtifacts(Long taskId) {
+            return artifacts.getOrDefault(taskId, List.of());
+        }
+
+        @Override
+        public void deleteArtifact(Long taskId, String artifactId) {
+            // This stub records nothing; artifact removal is verified through the artifact files.
+        }
+
+        @Override
+        public List<Task> listResumableTasks() {
+            return List.of();
+        }
+
+        @Override
+        public List<ResumeState> listResumeStates(Long taskId) {
+            return List.of();
+        }
+
+        @Override
+        public void saveResumeState(Long taskId, ResumeState state) {
+            // This stub records nothing; resume checkpoints are verified by the resume tests.
+        }
+
+        @Override
+        public void clearResumeStates(Long taskId) {
+            // This stub records nothing; the deletion queue is verified through artifact files.
+        }
+
         private final Map<Long, Task> tasks = new LinkedHashMap<>();
         private boolean failDeletion;
         private Runnable beforeDelete = () -> {};

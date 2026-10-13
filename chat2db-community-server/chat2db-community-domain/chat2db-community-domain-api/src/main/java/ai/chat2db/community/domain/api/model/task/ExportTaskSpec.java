@@ -40,4 +40,13 @@ public class ExportTaskSpec implements TaskSpec {
     private String exportPath;
 
     private String suggestedFileName;
+
+    /**
+     * Execution mode the client asked for. Export only implements the conservative path today, so a
+     * parallel mode is rejected instead of being silently downgraded to a standard export.
+     */
+    private String mode;
+
+    /** Output compression the client asked for; absent means the writer default. */
+    private String compression;
 }
