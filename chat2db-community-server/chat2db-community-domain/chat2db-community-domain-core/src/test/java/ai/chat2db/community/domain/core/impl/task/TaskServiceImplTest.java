@@ -109,6 +109,51 @@ class TaskServiceImplTest {
     }
 
     @Test
+    void taskControlsRespectOwnerAndOrganizationAndPreserveTerminalResult() throws Exception {
+        Task own = task(1L, 10L, 100L, tempDirectory.resolve("own.csv"));
+        Task otherUser = task(2L, 20L, 100L, tempDirectory.resolve("other.csv"));
+        Task otherOrganization = task(3L, 10L, 200L, tempDirectory.resolve("other-org.csv"));
+        OwnershipTaskStorage storage = new OwnershipTaskStorage(List.of(own, otherUser, otherOrganization));
+        LocalTaskManager manager = new LocalTaskManager(storage, new TaskExecutorRegistry(List.of()),
+                new ArtifactServiceImpl(), new ai.chat2db.community.domain.core.converter.ConnectionContextConverter(),
+                new ai.chat2db.community.domain.core.impl.task.extension.TaskExtensionManager(List.of(), List.of()), 1, 1);
+        TaskServiceImpl service = new TaskServiceImpl(storage, manager, new ArtifactServiceImpl());
+        ContextUtils.setContext(Context.builder().loginUser(LoginUser.builder().id(10L).build())
+                .organizationId(100L).build());
+        try {
+            assertEquals("SUCCESS", service.cancel(1L).getStatus());
+            assertEquals("TERMINAL", service.control(1L).getReason());
+            for (Long id : List.of(2L, 3L, 999L)) {
+                assertThrows(DataNotFoundException.class, () -> service.cancel(id));
+                assertThrows(DataNotFoundException.class, () -> service.control(id));
+            }
+            assertEquals("SUCCESS", own.getStatus());
+            assertEquals("SUCCESS", otherUser.getStatus());
+            assertEquals("SUCCESS", otherOrganization.getStatus());
+        } finally { manager.shutdown(); }
+    }
+
+    @Test
+    void controlNeverAdvertisesPauseOrRowResumeForUnprovenFormats() {
+        OwnershipTaskStorage storage = new OwnershipTaskStorage(List.of());
+        LocalTaskManager manager = new LocalTaskManager(storage, new TaskExecutorRegistry(List.of()),
+                new ArtifactServiceImpl(), new ai.chat2db.community.domain.core.converter.ConnectionContextConverter(),
+                new ai.chat2db.community.domain.core.impl.task.extension.TaskExtensionManager(List.of(), List.of()), 1, 1);
+        TaskServiceImpl service = new TaskServiceImpl(storage, manager, new ArtifactServiceImpl());
+        try {
+            for (String format : List.of("CSV", "JSON", "SQL", "XLSX")) {
+                storage.tasks.put(1L, Task.builder().id(1L).status("PENDING")
+                        .type("SQL".equals(format) ? "SQL_FILE_IMPORT" : "DATA_FILE_IMPORT")
+                        .specJson("{\"format\":\"" + format + "\"}").build());
+                var capability = service.control(1L);
+                assertTrue(capability.isCancelSupported());
+                org.junit.jupiter.api.Assertions.assertFalse(capability.isPauseSupported());
+                assertEquals("SAFE_PAUSE_UNSUPPORTED", capability.getPauseReason());
+            }
+        } finally { manager.shutdown(); }
+    }
+
+    @Test
     void importSubmissionLookupRequiresTheOriginalOwnerAndFingerprint() {
         Task own = Task.builder()
                 .id(7L)

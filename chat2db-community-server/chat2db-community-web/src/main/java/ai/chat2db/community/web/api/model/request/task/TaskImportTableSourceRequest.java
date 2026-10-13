@@ -2,6 +2,7 @@ package ai.chat2db.community.web.api.model.request.task;
 
 import ai.chat2db.community.domain.api.model.task.ImportColumnMapping;
 import ai.chat2db.community.domain.api.model.task.ImportOptions;
+import ai.chat2db.community.domain.api.model.task.CsvOptions;
 import ai.chat2db.community.domain.api.model.task.UnmappedTargetStrategy;
 import lombok.Data;
 
@@ -32,4 +33,6 @@ public class TaskImportTableSourceRequest {
     private UnmappedTargetStrategy unmappedTarget;
 
     private ImportOptions options;
+
+    private CsvOptions csvOptions;
 }

@@ -51,7 +51,7 @@ class TaskControllerDesktopContractTest {
                 .flatMap(mapping -> Arrays.stream(mapping.path()))
                 .collect(Collectors.toSet());
 
-        assertEquals(Set.of("/export", "/import", "/import/preview", "/resume", "/list", "/get", "/events", "/delete",
+        assertEquals(Set.of("/export", "/import", "/import/preview", "/resume", "/cancel", "/control", "/list", "/get", "/events", "/delete",
                 "/artifact", "/artifacts", "/active-count", "/prepare-user-exit", "/abort-user-exit"), paths);
 
         Arrays.stream(TaskController.class.getDeclaredMethods())
@@ -114,6 +114,38 @@ class TaskControllerDesktopContractTest {
         assertEquals("attachment; filename=\"rollback-report.json\"",
                 response.getHeaders().getFirst(HttpHeaders.CONTENT_DISPOSITION));
         assertEquals(diagnostic.toUri(), response.getBody().getURI());
+    }
+
+    @Test
+    void cancelAndCapabilityEndpointsSerializeTruthfulAcknowledgementsForDesktopAndHttp() throws Exception {
+        var state = ai.chat2db.community.domain.api.model.task.TaskControlState.builder()
+                .taskId(42L).status("RUNNING").cancelSupported(false).cancellationRequested(true)
+                .pauseSupported(false).reason("CANCELLATION_REQUESTED")
+                .pauseReason("SAFE_PAUSE_UNSUPPORTED").build();
+        java.util.List<String> calls = new java.util.ArrayList<>();
+        TaskService service = (TaskService) Proxy.newProxyInstance(getClass().getClassLoader(),
+                new Class<?>[]{TaskService.class}, (proxy, method, args) -> {
+                    assertEquals(42L, args[0]);
+                    calls.add(method.getName());
+                    return state;
+                });
+        TaskController controller = new TaskController(service, null, null, null);
+        Object[] values = ConsoleHelper.getValues("{\"taskId\":42}",
+                new Class<?>[]{TaskIdRequest.class}, new ConsoleResult());
+        TaskIdRequest request = assertInstanceOf(TaskIdRequest.class, values[0]);
+        var cancelled = controller.cancel(request);
+        assertEquals(state, cancelled.getData());
+        assertEquals(state, controller.control(request).getData());
+        assertEquals(java.util.List.of("cancel", "control"), calls);
+        var json = new com.fasterxml.jackson.databind.ObjectMapper().valueToTree(cancelled);
+        assertEquals("RUNNING", json.at("/data/status").asText());
+        assertTrue(json.at("/data/cancellationRequested").asBoolean());
+        assertFalse(json.at("/data/pauseSupported").asBoolean());
+        assertFalse(json.at("/data/cancelSupported").asBoolean());
+        assertEquals(org.springframework.web.bind.annotation.RequestMethod.POST,
+                requestMapping(TaskController.class.getMethod("cancel", TaskIdRequest.class)).method()[0]);
+        assertEquals(org.springframework.web.bind.annotation.RequestMethod.GET,
+                requestMapping(TaskController.class.getMethod("control", TaskIdRequest.class)).method()[0]);
     }
 
     private RequestMapping requestMapping(Method method) {

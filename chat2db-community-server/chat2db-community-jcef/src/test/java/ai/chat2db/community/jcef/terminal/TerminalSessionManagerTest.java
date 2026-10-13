@@ -88,6 +88,22 @@ class TerminalSessionManagerTest {
     }
 
     @Test
+    void killWaitsUntilTheShellReleasesItsWorkingDirectory() throws Exception {
+        Path sessionDirectory = java.nio.file.Files.createDirectory(directory.resolve("kill-release"));
+        Map<String, Object> session = TerminalSessionManager.create(sessionDirectory, 80, 24);
+        String sessionId = (String) session.get("sessionId");
+
+        TerminalSessionManager.kill(sessionId);
+
+        assertFalse((Boolean) TerminalSessionManager.status(sessionId).get("alive"));
+        // A shell that is still alive keeps a handle on its working directory, and this delete then
+        // fails with "being used by another process" — the symptom kill() used to leave behind.
+        java.nio.file.Files.delete(sessionDirectory);
+        assertFalse(java.nio.file.Files.exists(sessionDirectory),
+                "kill must not return while the spawned shell still holds its working directory");
+    }
+
+    @Test
     void resolvesConfiguredUserHomeForDefaultTerminalDirectory() {
         assertEquals(directory, TerminalSessionManager.resolveUserHomeDirectory(directory.toString()));
     }
