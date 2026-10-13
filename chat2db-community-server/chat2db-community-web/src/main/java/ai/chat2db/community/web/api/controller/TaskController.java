@@ -1,9 +1,12 @@
 package ai.chat2db.community.web.api.controller;
 
 import ai.chat2db.community.domain.api.model.PageResponse;
+import ai.chat2db.community.domain.api.model.task.ImportPreview;
 import ai.chat2db.community.domain.api.model.task.Task;
+import ai.chat2db.community.domain.api.model.task.TaskArtifact;
 import ai.chat2db.community.domain.api.model.task.TaskEvent;
 import ai.chat2db.community.domain.api.model.task.TaskQuery;
+import ai.chat2db.community.domain.api.model.task.TaskControlState;
 import ai.chat2db.community.domain.api.service.task.IImportTaskSubmissionService;
 import ai.chat2db.community.domain.api.service.task.TaskService;
 import ai.chat2db.community.tools.wrapper.result.ActionResult;
@@ -18,6 +21,7 @@ import ai.chat2db.community.web.api.model.request.task.TaskIdRequest;
 import ai.chat2db.community.web.api.model.request.task.TaskImportRequest;
 import ai.chat2db.community.web.api.model.response.task.TaskSubmitResponse;
 import jakarta.validation.Valid;
+import org.apache.commons.lang3.StringUtils;
 import org.springframework.core.io.Resource;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.DeleteMapping;
@@ -64,6 +68,29 @@ public class TaskController {
         return DataResult.of(new TaskSubmitResponse(taskId));
     }
 
+    @PostMapping("/import/preview")
+    public DataResult<ImportPreview> previewImport(@Valid @RequestBody TaskImportRequest request) {
+        if (StringUtils.isBlank(request.getFileId())) {
+            throw new ai.chat2db.community.tools.exception.ParamBusinessException("fileId");
+        }
+        return DataResult.of(taskService.previewImport(taskWebConverter.importRequest2spec(request)));
+    }
+
+    @PostMapping("/resume")
+    public DataResult<TaskSubmitResponse> resume(@RequestBody @Valid TaskIdRequest request) {
+        return DataResult.of(new TaskSubmitResponse(taskService.resume(request.getTaskId())));
+    }
+
+    @PostMapping("/cancel")
+    public DataResult<TaskControlState> cancel(@RequestBody @Valid TaskIdRequest request) {
+        return DataResult.of(taskService.cancel(request.getTaskId()));
+    }
+
+    @GetMapping("/control")
+    public DataResult<TaskControlState> control(@Valid TaskIdRequest request) {
+        return DataResult.of(taskService.control(request.getTaskId()));
+    }
+
     @GetMapping("/list")
     public WebPageResult<Task> list(TaskQuery query) {
         PageResponse<Task> page = taskService.list(query);
@@ -94,9 +121,16 @@ public class TaskController {
         return ActionResult.isSuccess();
     }
 
+    @GetMapping("/artifacts")
+    public DataResult<List<TaskArtifact>> artifacts(@Valid TaskIdRequest request) {
+        return DataResult.of(taskService.listArtifacts(request.getTaskId()));
+    }
+
     @GetMapping("/artifact")
     public ResponseEntity<Resource> artifact(@Valid TaskIdRequest request) {
-        return taskDownloadWebConverter.toResponse(taskService.resolveArtifact(request.getTaskId()));
+        return taskDownloadWebConverter.toResponse(StringUtils.isBlank(request.getArtifactId())
+                ? taskService.resolveArtifact(request.getTaskId())
+                : taskService.resolveArtifact(request.getTaskId(), request.getArtifactId()));
     }
 
     @GetMapping("/active-count")

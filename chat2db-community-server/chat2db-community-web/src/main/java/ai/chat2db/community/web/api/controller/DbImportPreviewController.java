@@ -10,11 +10,16 @@ import ai.chat2db.community.web.api.aspect.connection.ConnectionInfoAspect;
 import ai.chat2db.community.web.api.converter.db.DbImportWebConverter;
 import ai.chat2db.community.web.api.model.request.db.DesktopImportFileRequest;
 import ai.chat2db.community.web.api.model.request.db.ImportExecuteRequest;
+import ai.chat2db.community.web.api.model.request.db.ImportFileReleaseRequest;
 import ai.chat2db.community.web.api.model.request.db.ImportPreviewRequest;
 import ai.chat2db.community.web.api.model.request.db.ImportSheetsRequest;
 import ai.chat2db.community.web.api.model.response.task.TaskSubmitResponse;
 import jakarta.validation.Valid;
 import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.beans.factory.annotation.Autowired;
+import ai.chat2db.community.web.api.adapter.db.ImportUploadCapabilityAdapter;
+import ai.chat2db.community.web.api.model.response.db.ImportUploadCapabilities;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
@@ -42,6 +47,14 @@ public class DbImportPreviewController {
 
     private final ImportFileUploadAdapter importFileUploadAdapter;
 
+    @Autowired
+    private ImportUploadCapabilityAdapter uploadCapabilityAdapter;
+
+    @GetMapping("/capabilities")
+    public DataResult<ImportUploadCapabilities> capabilities() {
+        return DataResult.of(uploadCapabilityAdapter.capabilities());
+    }
+
     public DbImportPreviewController(IDbImportPreviewService importPreviewService,
             IDbMappedImportService mappedImportService,
             IImportFileStagingService importFileStagingService, DbImportWebConverter importWebConverter,
@@ -61,6 +74,12 @@ public class DbImportPreviewController {
     @PostMapping("/upload_local")
     public DataResult<String> uploadDesktopFile(@Valid @RequestBody DesktopImportFileRequest request) {
         return DataResult.of(importFileUploadAdapter.stageDesktopFile(request));
+    }
+
+    @PostMapping("/release")
+    public DataResult<Void> release(@Valid @RequestBody ImportFileReleaseRequest request) {
+        importFileStagingService.releaseUnclaimed(request.getFileId());
+        return DataResult.empty();
     }
 
     @PostMapping("/preview")
