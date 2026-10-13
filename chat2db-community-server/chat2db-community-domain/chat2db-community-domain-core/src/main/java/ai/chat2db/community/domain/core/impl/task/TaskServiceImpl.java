@@ -9,6 +9,7 @@ import ai.chat2db.community.domain.api.model.task.ImportPreview;
 import ai.chat2db.community.domain.api.model.task.ImportTaskSpec;
 import ai.chat2db.community.domain.api.model.task.ImportTableSource;
 import ai.chat2db.community.domain.api.model.task.Task;
+import ai.chat2db.community.domain.api.model.task.TaskControlState;
 import ai.chat2db.community.domain.api.model.task.TaskArtifact;
 import ai.chat2db.community.domain.api.model.task.TaskArtifactRole;
 import ai.chat2db.community.domain.api.model.task.TaskConstants;
@@ -271,6 +272,22 @@ public class TaskServiceImpl implements TaskService {
             throw new BusinessException("task.resume.conflict", null, race);
         }
         return taskId;
+    }
+
+    @Override
+    public TaskControlState cancel(Long taskId) {
+        if (get(taskId) == null) {
+            throw new DataNotFoundException();
+        }
+        return localTaskManager.cancel(taskId);
+    }
+
+    @Override
+    public TaskControlState control(Long taskId) {
+        if (get(taskId) == null) {
+            throw new DataNotFoundException();
+        }
+        return localTaskManager.control(taskId);
     }
 
     /**

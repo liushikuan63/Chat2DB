@@ -394,11 +394,11 @@ final class TaskRunner<S extends TaskSpec> implements Runnable {
         taskStorage.compareAndSetStatus(submission.taskId(), TaskStatus.RUNNING.name(), TaskStatus.CANCELLED.name(),
                 TaskStatusPatch.builder()
                         .stage(TaskStage.CANCELLED.name())
-                        .progressMessage("Task cancelled")
+                        .progressMessage("Task cancelled; previously committed data is retained")
                         .finishedAt(now)
                         .updatedAt(now)
                         .build(),
-                lifecycleEvent(TaskEventCode.TASK_CANCELLED.name(), TaskEventLevel.INFO.name(), "Task cancelled"));
+                lifecycleEvent(TaskEventCode.TASK_CANCELLED.name(), TaskEventLevel.INFO.name(), "Task cancelled; previously committed data is retained"));
     }
 
     private TaskEvent lifecycleEvent(String code, String level, String message) {

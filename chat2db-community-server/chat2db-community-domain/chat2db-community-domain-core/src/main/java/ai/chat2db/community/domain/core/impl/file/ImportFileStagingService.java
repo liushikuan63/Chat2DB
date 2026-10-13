@@ -103,6 +103,12 @@ public class ImportFileStagingService implements IImportFileStagingService {
     }
 
     @Override
+    public ai.chat2db.community.domain.api.model.task.ImportStagingLimits uploadLimits() {
+        return new ai.chat2db.community.domain.api.model.task.ImportStagingLimits(
+                maxSizeBytes(), maxTotalSizeBytes(), maxFiles());
+    }
+
+    @Override
     public File resolve(String fileId) {
         if (!isFileId(fileId)) {
             throw new BusinessException("import.preview.fileUnreadable");

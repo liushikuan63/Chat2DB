@@ -4,6 +4,9 @@ import ai.chat2db.community.domain.api.model.metadata.TableColumn;
 import ai.chat2db.community.domain.api.model.task.ImportAdmissionFinding;
 import ai.chat2db.community.domain.api.model.task.ImportAdmissionReport;
 import ai.chat2db.community.domain.api.model.task.ImportTaskSpec;
+import ai.chat2db.community.domain.api.model.task.TaskCancelledException;
+import ai.chat2db.community.domain.core.impl.task.imports.reader.CsvImportReader;
+import ai.chat2db.community.domain.core.impl.task.imports.excel.CSVImporter;
 import ai.chat2db.community.domain.api.model.task.TaskErrorCode;
 import ai.chat2db.community.domain.api.model.task.TaskExecutionException;
 import ai.chat2db.community.domain.api.model.task.TaskExecutionMode;
@@ -24,6 +27,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.CancellationException;
 import ai.chat2db.spi.model.imports.ImportResourceSnapshot;
 import ai.chat2db.spi.sql.Chat2DBContext;
 
@@ -67,6 +71,13 @@ public final class ImportParallelAdmission {
 
     private static ImportAdmissionReport assess(ImportTaskSpec spec, List<TableColumn> tableColumns,
             ImportResourceSnapshot resources, boolean shardScope) {
+        return assess(spec, tableColumns, resources, shardScope, () -> {
+            if (Thread.currentThread().isInterrupted()) throw new CancellationException("CSV admission interrupted");
+        });
+    }
+
+    private static ImportAdmissionReport assess(ImportTaskSpec spec, List<TableColumn> tableColumns,
+            ImportResourceSnapshot resources, boolean shardScope, Runnable checkCancelled) {
         File source = new File(StringUtils.defaultString(spec.getSourceFile()));
         String format = StringUtils.upperCase(StringUtils.trimToEmpty(spec.getFormat()), Locale.ROOT);
         boolean requestedParallel = TaskExecutionMode.isUltraFast(spec.getMode());
@@ -82,7 +93,8 @@ public final class ImportParallelAdmission {
             blocker(findings, "C2", "Compressed or container input cannot enter parallel execution directly",
                     "ZIP/GZIP container signature detected", "Decompress to a supported plain-text format first.");
         } else if ("CSV".equals(format)) {
-            CsvFacts facts = scanCsv(source, spec, findings);
+            CsvFacts facts = spec.getCsvOptions() == null ? scanCsv(source, spec, findings)
+                    : scanTypedCsv(source, spec, findings, checkCancelled);
             rows = facts.dataRows();
             fullScan = facts.fullScan();
             assessCsvTarget(spec, tableColumns, facts.headers(), relationshipAccepted, findings);
@@ -180,7 +192,7 @@ public final class ImportParallelAdmission {
         ImportResourceSnapshot resources = Chat2DBContext.getDbManager().probeImportResources(
                 Chat2DBContext.getConnection(), spec.getTarget().getDatabaseName(),
                 spec.getTarget().getSchemaName());
-        ImportAdmissionReport report = assess(spec, tableColumns, resources, shardScope);
+        ImportAdmissionReport report = assess(spec, tableColumns, resources, shardScope, context::checkCancelled);
         Map<String, Object> details = details(report);
         if (TaskExecutionMode.isUltraFast(spec.getMode()) && FORBIDDEN.equals(report.getVerdict())) {
             context.logError("IMPORT_PARALLEL_ADMISSION", "Parallel import rejected before execution", details);
@@ -267,6 +279,53 @@ public final class ImportParallelAdmission {
         } else if (!resources.diskCapacitySufficient()) {
             blocker(findings, "E1", "The target does not have enough verified disk capacity",
                     resources.evidence(), "Free disk space or reduce the import batch before retrying.");
+        }
+    }
+
+    private static CsvFacts scanTypedCsv(File source, ImportTaskSpec spec,
+            List<ImportAdmissionFinding> findings, Runnable checkCancelled) {
+        List<String> headers = new ArrayList<>();
+        long[] rows = {0L};
+        try {
+            checkCancelled.run();
+            CsvImportReader.read(source, spec.getCsvOptions(), Integer.MAX_VALUE,
+                    CSVImporter.mappedSourceColumnCount(spec), header -> {
+                        headers.addAll(header.values());
+                        validateHeaders(headers, findings);
+                        rejectMultiline(headers, "header", findings);
+                    }, (row, number) -> {
+                        rows[0]++;
+                        rejectMultiline(row.values(), "record " + number, findings);
+                        if (row.size() != headers.size()) {
+                            blocker(findings, "D2", "CSV column count is inconsistent",
+                                    "Record " + number + " has " + row.size() + " columns; expected " + headers.size(),
+                                    "Correct the CSV dialect or regenerate the source with a stable header.");
+                        }
+                    }, checkCancelled);
+            if (headers.isEmpty()) {
+                blocker(findings, "D2", "CSV has no selected header or data",
+                        "The selected header/range contains no records",
+                        "Select a valid header and data range, then preview the file again.");
+            }
+            return new CsvFacts(headers, rows[0], true);
+        } catch (TaskCancelledException | CancellationException cancelled) {
+            throw cancelled;
+        } catch (Exception failure) {
+            blocker(findings, "D1", "The CSV source could not be decoded and parsed deterministically",
+                    failure.getClass().getSimpleName() + ": " + StringUtils.defaultString(failure.getMessage()),
+                    "Specify the correct charset and CSV dialect, then preview the file again.");
+            return new CsvFacts(List.of(), -1L, false);
+        }
+    }
+
+    private static void rejectMultiline(Iterable<String> values, String record,
+            List<ImportAdmissionFinding> findings) {
+        for (String value : values) {
+            if (value != null && (value.indexOf('\n') >= 0 || value.indexOf('\r') >= 0)) {
+                blocker(findings, "C3", "A CSV field spans physical lines", record,
+                        "Use STANDARD mode or pre-process embedded newlines into escaped text.");
+                return;
+            }
         }
     }
 

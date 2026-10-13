@@ -312,6 +312,7 @@ public final class CsvManifestImporter {
         options.setQuoteChar("\"");
         options.setSkipRows(0);
         copy.setOptions(options);
+        copy.setCsvOptions(CsvShardPreprocessor.canonicalOptions(copy.getCsvOptions()));
         return copy;
     }
 

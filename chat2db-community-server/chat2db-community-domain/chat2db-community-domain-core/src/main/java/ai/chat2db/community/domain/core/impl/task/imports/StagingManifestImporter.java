@@ -631,6 +631,8 @@ public final class StagingManifestImporter {
         Map<TableIdentity, ImportTaskSpec> result = new LinkedHashMap<>();
         for (ImportTableSource source : ImportTaskSourceSupport.effectiveSources(spec)) {
             ImportTaskSpec tableSpec = ImportTaskSourceSupport.specForSource(spec, source);
+            tableSpec.setCsvOptions(CsvShardPreprocessor.canonicalOptions(
+                    ImportFileProbe.effectiveCsvOptions(tableSpec)));
             TableIdentity identity = TableIdentity.of(source);
             if (result.putIfAbsent(identity, tableSpec) != null) {
                 throw new IllegalArgumentException("Duplicate import table source: "
@@ -795,7 +797,8 @@ public final class StagingManifestImporter {
 
     private static List<String> header(ImportManifestShard shard) throws IOException {
         Path source = Path.of(shard.getSourcePath()).toAbsolutePath().normalize();
-        try (CSVParser parser = CSVParser.parse(source, StandardCharsets.UTF_8, CSVFormat.DEFAULT)) {
+        try (CSVParser parser = CSVParser.parse(source, StandardCharsets.UTF_8,
+                CsvShardPreprocessor.canonicalReadFormat())) {
             var records = parser.iterator();
             if (!records.hasNext()) {
                 throw new IllegalArgumentException("CSV shard requires a header: " + shard.getShardId());
@@ -855,7 +858,8 @@ public final class StagingManifestImporter {
         long acceptedInBatch = 0L;
         PreparedStatement raw = null;
         PreparedStatement typed = null;
-        try (CSVParser parser = CSVParser.parse(source, StandardCharsets.UTF_8, CSVFormat.DEFAULT)) {
+        try (CSVParser parser = CSVParser.parse(source, StandardCharsets.UTF_8,
+                CsvShardPreprocessor.canonicalReadFormat())) {
             raw = prepare(connection, context, rawSql);
             typed = prepare(connection, context, typedSql);
             var records = parser.iterator();
@@ -970,10 +974,20 @@ public final class StagingManifestImporter {
         for (int index = 0; index < stage.resolution.tableColumns().size(); index++) {
             Integer sourceIndex = stage.resolution.fileIndexes().get(index);
             String value = sourceIndex == null ? null : record.get(sourceIndex);
-            if (value == null || value.isEmpty()
+            // The canonical reader already applied CSV null/quoted-empty semantics.
+            if (value == null
                     || options != null && Objects.equals(options.getNullString(), value)) {
                 statement.setNull(index + 1, Types.NULL);
             } else {
+                if (!value.isEmpty()) {
+                    try {
+                        value = ai.chat2db.community.domain.core.impl.task.imports.excel.CsvImportValueNormalizer
+                                .normalize(value, stage.resolution.tableColumns().get(index), spec.getCsvOptions(), row);
+                    } catch (RuntimeException invalidValue) {
+                        // Conversion errors use the same row savepoint/SKIP policy as JDBC casts.
+                        throw new SQLException("CSV value conversion failed", invalidValue);
+                    }
+                }
                 statement.setString(index + 1, value);
             }
         }

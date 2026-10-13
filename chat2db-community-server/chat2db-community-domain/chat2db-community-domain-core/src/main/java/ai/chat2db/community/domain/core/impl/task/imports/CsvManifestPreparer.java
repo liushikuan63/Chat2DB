@@ -22,13 +22,13 @@ import ai.chat2db.spi.IDbMetaData;
 import ai.chat2db.spi.model.datasource.ConnectInfo;
 import ai.chat2db.spi.model.request.TableMetadataRequest;
 import ai.chat2db.spi.sql.Chat2DBContext;
-import org.apache.commons.csv.CSVFormat;
+import ai.chat2db.community.domain.api.model.task.CsvOptions;
+import ai.chat2db.community.domain.core.impl.task.imports.excel.CSVImporter;
 import org.apache.commons.lang3.StringUtils;
 
 import java.io.File;
 import java.io.IOException;
 import java.io.InputStream;
-import java.nio.charset.Charset;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.security.MessageDigest;
@@ -116,10 +116,10 @@ public final class CsvManifestPreparer {
             List<ImportManifestShard> shards = new ArrayList<>();
             for (SourcePreparation preparation : preparations) {
                 int layer = layer(plan, preparation.tableKey());
-                shards.addAll(CsvShardPreprocessor.preprocess(preparation.file(), preparation.charset(),
-                        preparation.csvFormat(), attemptDirectory, preparation.source().getDatabaseName(),
+                shards.addAll(CsvShardPreprocessor.preprocess(preparation.file(), preparation.options(),
+                        preparation.minimumColumns(), attemptDirectory, preparation.source().getDatabaseName(),
                         preparation.source().getSchemaName(), preparation.source().getTableName(),
-                        preparation.tableKey(), layer, targetBytes, preparation.skipRows()));
+                        preparation.tableKey(), layer, targetBytes, context::checkCancelled));
             }
             context.checkCancelled();
             if (!sourceFingerprints.equals(fingerprints(preparations))) {
@@ -199,21 +199,8 @@ public final class CsvManifestPreparer {
             throw new TaskExecutionException(TaskErrorCode.IMPORT_FAILED.name(),
                     "Schema/database manifest import currently requires CSV for every table source");
         }
-        try {
-            Charset charset = ImportFileProbe.effectiveCharset(file,
-                    sourceSpec.getOptions() == null ? null : sourceSpec.getOptions().getCharset());
-            char quote = ImportFileProbe.quoteChar(
-                    sourceSpec.getOptions() == null ? null : sourceSpec.getOptions().getQuoteChar());
-            char delimiter = ImportFileProbe.delimiterChar(
-                    sourceSpec.getOptions() == null ? null : sourceSpec.getOptions().getDelimiter(), charset, file);
-            int skipRows = sourceSpec.getOptions() == null || sourceSpec.getOptions().getSkipRows() == null
-                    ? 0 : Math.max(0, sourceSpec.getOptions().getSkipRows());
-            return new SourcePreparation(source, file, ImportTaskSourceSupport.tableKey(source), charset,
-                    ImportFileProbe.csvFormat(delimiter, quote), skipRows);
-        } catch (IOException failure) {
-            throw new TaskExecutionException(TaskErrorCode.IMPORT_FAILED.name(),
-                    "Could not detect CSV dialect for target table " + source.getTableName(), failure);
-        }
+        return new SourcePreparation(source, file, ImportTaskSourceSupport.tableKey(source),
+                ImportFileProbe.effectiveCsvOptions(sourceSpec), CSVImporter.mappedSourceColumnCount(sourceSpec));
     }
 
     private static String aggregateVerdict(List<ImportAdmissionReport> admissions) {
@@ -355,6 +342,6 @@ public final class CsvManifestPreparer {
     }
 
     private record SourcePreparation(ImportTableSource source, File file, String tableKey,
-            Charset charset, CSVFormat csvFormat, int skipRows) {
+            CsvOptions options, int minimumColumns) {
     }
 }
