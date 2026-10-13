@@ -514,6 +514,32 @@ JCEF 在 native handler 和 backend bridge 共用入口同步检查有效主 fra
 
 结论只适用于本机 H2 与本地构型：不是 MySQL/PostgreSQL 性能结论，也没有符合准入的 ULTRA_FAST 样本。日志 `.superpowers/sdd/vibecoding/logs/h2-baseline-20261013.log`。
 
+### 运行时 capability/control HTTP 验收（新 startup jar，2026-10-13）
+
+先按 `mvn -B clean package "-Dmaven.test.skip=true" "-Dchat2db.finalName=chat2db-community" -f chat2db-community-server/pom.xml -pl chat2db-community-start -am` 重新打包（exit 0，产物 `chat2db-community-server/chat2db-community-start/target/chat2db-community.jar`），再以隔离 home + loopback 启动该产物做真实请求验收：
+
+```bash
+java "-Dloader.path=chat2db-community-server/chat2db-community-start/target/lib" \
+  "-Dchat2db.gui=false" "-Dchat2db.runtime.mode=community" "-Dchat2db.network.status=OFFLINE" \
+  "-Dserver.address=127.0.0.1" "-Dserver.port=10825" "-Dspring.profiles.active=dev" \
+  "-Duser.home=<isolated>" -jar chat2db-community-server/chat2db-community-start/target/chat2db-community.jar
+```
+
+结果（PID 51540，`Started Application in 4.311 seconds`，Tomcat 起在 10825 loopback；验收后只停这一个进程，端口已释放）：
+
+| 请求 | HTTP | 结果 |
+|---|---|---|
+| `GET /api/rdb/import_preview/capabilities` | 200 | 真实能力值：singleFileMaxBytes=52428800、multiFileMaxBytes=1073741824、multiTotalMaxBytes=10737418240、stagingMaxTotalBytes=10737418240、multipartMaxRequestBytes=1074790400、maxFiles=1000 |
+| `GET /api/tasks/control?taskId=999999` | 200 | 定义错误 `common.dataNotFound`（未知任务不崩、不误报可取消） |
+| `POST /api/tasks/cancel {"taskId":999999}` | 200 | 同上 `common.dataNotFound` |
+| `GET /api/tasks/list?pageNo=1&pageSize=5` | 200 | `total=0` 空页（隔离 home + OFFLINE） |
+| 不存在路径（负向对照） | 200 | 返回前端 index.html：未知路径由 SPA 兜底，不是 404 |
+
+`/api/cli/v1/runtime/capabilities` 在本社区构型下未映射（同样落到 SPA 兜底），本轮不作为验收项。隔离 home 的社区密钥按 `~/.config/chat2db-community/encryption.key` 生成，密钥本身不落库、不入文档与汇报。
+
 ### 本批仍未完成
 
-运行时 capability/control HTTP 验收（新 startup jar）、Docker 恢复后的真实 MySQL 单/多表/下载/坏行/响应丢失/取消浏览器闭环、真实新 PG/MySQL 保存点与取消、native 安装包与平台跳过项、层级传播（fn09–fn13）与现有 PR 更新。未执行前不得按「已完成」上报。
+- 运行时任务级验收：真实上传/多表/坏行/下载/响应丢失，以及「运行中任务被取消」的端到端链路，都需要真实数据源与 Docker/MySQL（见下条），本轮 HTTP 验收只覆盖 capability/control/list 端点。
+- Docker 恢复后的真实 MySQL 单/多表/下载/坏行/响应丢失/取消浏览器闭环、真实新 PG/MySQL 保存点与取消、native 安装包与平台跳过项。
+- 层级传播（fn09–fn13）与现有 PR 更新；未执行前不得按「已完成」上报。
+- 本轮未复核的既有缺口（沿用上批记录，未改变）：提供方 Actions 限制、ULTRA_FAST 样本缺失、Kingbase 未实测。
