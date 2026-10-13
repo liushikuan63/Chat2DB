@@ -96,15 +96,13 @@ export default {
   'common.text.tryToRestart': '再起動を試みる',
   'common.text.contactUs': 'お問い合わせ',
   'common.text.wechatPopularizeAi': 'WeChat公式アカウントをフォローし、「AI」を送信して無料体験を取得。',
-  'common.text.wechatPopularizeAi2':
-    'WeChat公式アカウントをフォローし、「AI」を送信して無料でApiKeyを取得し、体験回数をプレゼント。',
+  'common.text.wechatPopularizeAi2': 'WeChat公式アカウントをフォローし、「AI」を送信して無料でApiKeyを取得し、体験回数をプレゼント。',
   'common.text.wechatPopularize': '「プロモーション」を送信して、さらに無料体験を取得。',
   'common.text.export': 'エクスポート',
   'common.notification.detail': '詳細を見る',
   'common.notification.solution': '解決策',
   'common.button.copyError': 'エラーレポートをコピー',
-  'common.button.copyErrorTips':
-    '（ここではAPI情報と詳細なパラメータがコピーされます。機密情報がある場合は、JSONを解析してから送信してください）',
+  'common.button.copyErrorTips': '（ここではAPI情報と詳細なパラメータがコピーされます。機密情報がある場合は、JSONを解析してから送信してください）',
   'common.tips.formatError': 'フォーマット失敗、SQLが正しいかどうかを確認してください',
   'common.text.executeSelectedSQL': '選択したSQLを実行',
   'common.text.refreshPage': 'ページを更新',
@@ -252,8 +250,7 @@ export default {
   'common.text.showFieldType': 'フィールド型を表示',
   'common.text.showFieldComment': 'フィールドコメントを表示',
   'common.text.showHideColumns': '列を管理',
-  'common.text.manageColumns.tooltip':
-    '列を検索し、現在の結果セットに表示する列を選択します。少なくとも 1 列は表示する必要があります。',
+  'common.text.manageColumns.tooltip': '列を検索し、現在の結果セットに表示する列を選択します。少なくとも 1 列は表示する必要があります。',
   'common.button.hideColumn': 'この列を非表示',
   'common.button.hideSelectedColumns': '選択した列を非表示',
   'common.button.showAllColumns': 'すべての列を表示',

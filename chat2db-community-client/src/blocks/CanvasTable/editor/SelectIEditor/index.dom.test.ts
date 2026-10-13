@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict';
 import { JSDOM } from 'jsdom';
 
+import { importModule } from '@/testUtils/importModule';
+
 const dom = new JSDOM('<!doctype html><html><body></body></html>', {
   pretendToBeVisual: true,
   url: 'http://localhost',
@@ -85,8 +87,8 @@ const nextTask = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
 async function main() {
   const [{ act }, { SelectEditor }, { MultiSelectEditor }] = await Promise.all([
     import('react'),
-    import('./index'),
-    import('../MultiSelectIEditor'),
+    importModule<typeof import('./index')>(() => import('./index')),
+    importModule<typeof import('../MultiSelectIEditor')>(() => import('../MultiSelectIEditor')),
   ]);
 
   const options = [

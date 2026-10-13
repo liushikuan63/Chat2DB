@@ -22,6 +22,17 @@ export interface TaskListLoadMoreRequest {
   requestGeneration: number;
 }
 
+/**
+ * A task waiting to be picked up again after a restart is PENDING + RESUMING. PENDING also counts
+ * as an active status, so this predicate must not be combined with an `isActive` guard: that is what
+ * made the resume action impossible to render.
+ */
+export const isTaskResumable = (task: {
+  status: ImportExportTaskStatus;
+  stage?: string | null;
+}): boolean =>
+  task.status === ImportExportTaskStatus.PENDING && task.stage === 'RESUMING';
+
 export const createTaskListRequestCoordinator = () => {
   let stateGeneration = 0;
   let loadMoreRequestGeneration = 0;

@@ -1,9 +1,10 @@
 import assert from 'node:assert/strict';
-import { ImportExportTaskStatus, ImportExportTaskType } from '@/constants/importExport';
+import { ImportExportTaskStatus, ImportExportTaskType, ACTIVE_TASK_STATUSES } from '@/constants/importExport';
 import { ImportExportTaskDetails, ImportExportTaskEvent } from '@/typings/importExport';
 import {
   FAILED_TASK_POLL_INTERVAL,
   getTaskPollingDelay,
+  isTaskResumable,
   listAllTasksByStatus,
   loadMissingTrackedTasks,
   mergeTaskEvents,
@@ -232,4 +233,22 @@ void testActiveTaskPagination().then(async () => {
   testPollingRetryPolicy();
   testCompletedTaskNotifications();
   testImportTargetRefreshWaitsForTerminalImportResult();
+  testResumableTaskIsVisibleEvenThoughPendingCountsAsActive();
 });
+
+/**
+ * PENDING is in ACTIVE_TASK_STATUSES, so a resume action guarded by `!isActive` can never render.
+ * The predicate itself must therefore stand on the task fields alone.
+ */
+function testResumableTaskIsVisibleEvenThoughPendingCountsAsActive() {
+  const pendingResuming = { status: ImportExportTaskStatus.PENDING, stage: 'RESUMING' };
+  const pendingFresh = { status: ImportExportTaskStatus.PENDING, stage: null };
+  const running = { status: ImportExportTaskStatus.RUNNING, stage: 'RESUMING' };
+  const succeeded = { status: ImportExportTaskStatus.SUCCESS, stage: 'RESUMING' };
+
+  assert.equal(ACTIVE_TASK_STATUSES.includes(pendingResuming.status), true);
+  assert.equal(isTaskResumable(pendingResuming), true, 'a restarted task must offer resume');
+  assert.equal(isTaskResumable(pendingFresh), false, 'a queued task is not waiting for a resume');
+  assert.equal(isTaskResumable(running), false, 'a running task is not waiting for a resume');
+  assert.equal(isTaskResumable(succeeded), false, 'a finished task cannot be resumed');
+}
