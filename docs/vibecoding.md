@@ -547,9 +547,25 @@ java "-Dloader.path=chat2db-community-server/chat2db-community-start/target/lib"
 - 收尾：`--cleanup` 已移除具名容器（`REMOVED d1b271876a82449db9857cc723987952ef9a4a315ce7351bea851a7d6d03d87f`），只停本轮启动的后端/前端进程，10825 与 8889 均已释放，未触碰其它容器。
 - 一处操作失误已复原并留痕：首启误用真实 home 的 `user.home`（4 秒后即停），且驱动 jar 被下到真实 home 的 `jdbc-lib`；该 jar 已删除（恢复为仅 `h2-2.1.214.jar`），真实 home 只多了该实例自写的 `dev/logs/*` 与 `storage/result-snapshot/index-22724.json`，未再改动以避免误删用户数据。此后所有后端均使用 `.superpowers/sdd/vibecoding/http-smoke-home` 隔离 home。
 
+### 层级传播与推送（2026-10-13）
+
+按用户当轮授权执行：每层从整合分支取本层切片的最终内容（`git checkout 512e3666c -- <层路径>`），逐层提交、推送，并在每层推完立即用 `ls-remote` 回读；未使用强制推送，未改动根工作区。
+
+| 层 | 分支 | 新头 | PR |
+|---|---|---|---|
+| backend（domain-api / domain-core） | `codex/fn-09-task-runtime-and-import-execution` | `e7ad513f4` | #42 |
+| web API | `codex/fn-10-web-api` | `21d367c31` | #43 |
+| client services / hooks / utils / typings | `codex/fn-12-client-import-services` | `9ca9ce7a5` | #45 |
+| client wizard / i18n | `codex/fn-13-client-import-export-wizard` | `881935e5e` | #46 |
+| docs / CI / scripts（整合层） | `codex/fn-14-repo-hygiene` | `512e3666c` | #47 |
+
+- 切片一致性：四层各自对其路径与 `512e3666c` 的 `git diff` 均为空，即各层之和复现整合分支的对应内容。
+- fn-11（runtime messages / JCEF）本批无内容：未改、未推，PR #44 保持原状。
+- 一处纠偏已留痕：fn-12 按路径取 `src/utils` 时带进两个更早 client 批次的测试文件（`jcefZoom.test.ts`、`shortcutDispatch.test.ts`），它们引用本层不存在的 `@/testUtils/importModule`；已用一次不加力的回滚提交（`9ca9ce7a5`）恢复本层内容。**已知遗留**：这两个文件在根分支上的较新内容不属于 fn-09/10/12/13 任一层，本轮未再指派归属，后续要么归入相应 client 层，要么在整合层保留。
+- 推送即在原 PR 上生效（分支头与 PR 绑定），未新建 PR、未合并、未触发 workflow（fork Actions 仍按暂停口径处理）。
+
 ### 本批仍未完成
 
 - 浏览器用例只覆盖「必填映射阻止提交 + 真实单表导入 + 任务成功 100% + CSV 导出下载」；多表、坏行、响应丢失、运行中取消的浏览器闭环仍未跑，不能由本次结果冒充通过。
 - 真实 PostgreSQL/MySQL 保存点下的取消链路、`ImportPerformanceBaselineIT` 之外的 ULTRA_FAST 准入样本、native 安装包与平台跳过项。
-- 层级传播（fn09–fn13）与现有 PR 更新；未执行前不得按「已完成」上报。
-- 本轮未复核的既有缺口（沿用上批记录，未改变）：提供方 Actions 限制、Kingbase 未实测。
+- 两个 client 测试文件的层级归属遗留（见上「层级传播与推送」），以及 fork Actions 与提供方 CI 未复核。
