@@ -378,7 +378,7 @@ mvn -B -o -f chat2db-community-server/pom.xml -pl '<module>' -am \
 
 执行方法：systematic-debugging + test-driven-development + subagent-driven-development。三个第一批任务文件独立，在隔离 worktree 并行实现；根依次复核补丁并集成，执行 owning module full tests/package，再按既有授权和层级关系交付。模型与临时文件只服务本轮；不把技能默认签字/固定目录作为额外门槛。
 
-进度：第一批已完成组合代码验收；第二批进行中；第三批未开始。当前聊天 01a1211f-4275-72a0-93d9-8055bdbc0240；2026-10-13 检查成功 compact=3，rotation_due=false。详细测试/决策/下一步见本计划的 .superpowers/sdd/vibecoding/progress.md。
+进度：第一批和第二批代码/真实方言 IT 已提交并推送 fn09–fn14；Task 6 真实浏览器验收仍有缺口。第三批 Task 7–12 源码已集成，最终 owning core+web reactor package 实际 2144 tests / 0 failures / 0 errors / 0 skipped；前端 lint、Community build、定向脚本和两组模拟接口浏览器契约通过。真实新 API HTTP、修复后的 MySQL CSV 下载/多表/取消、新事务流程的真实 PG/MySQL 验收及最终性能基线复测仍待完成，不能宣布全部功能验收完成。当前聊天 01a1211f-4275-72a0-93d9-8055bdbc0240；2026-10-13 20:53 检查成功 compact=5，rotation_due=true。当前工具无新建聊天入口，后台应用 UIA/CDP 也不能送达接续；证据、提交及具体下一步保存在 .superpowers/sdd/vibecoding/progress.md。
 
 ### Task 1: Excel 预览与执行选项契约（第一批）
 
@@ -386,10 +386,10 @@ mvn -B -o -f chat2db-community-server/pom.xml -pl '<module>' -am \
 
 消费者是保留的 mapped import preview/execute public API 和 domain API；新 Single UI 未暴露 rich ExcelOptions，不能伪造页面复现。既有 ExcelImportReader.read(File, ExcelOptions, int limit, int minimumColumns, Consumer<Map<Integer,String>>, BiConsumer<Map<Integer,ImportCell>,Integer>, Runnable) 已处理无表头、sheet、headerRow、dataStartRow/dataEndRow/columnRange。现执行直接 EasyExcel，batcher 仅 invokeHead 初始化，headerless 跳行且 finish 返回；range未使用。
 
-- [ ] 先在 ExcelImportSheetContractTest/XLSXImporterExecutionTest 或独立 owning-module fixture 测试中生成真实 XLS/XLSX：无表头首行必须入库；前导说明行+headerRow；行范围外不入库；列范围重映射与预览相同。预期值手工定义，不调用生产 helper 生成 expected。
-- [ ] 运行 Java17 Maven focused tests，确认正确原因失败；记录非零 test count、失败断言和日志。
-- [ ] 最小修复执行与预览共用 reader 语义，保留 typed/null/date/number 处理、sheet 选择、取消、STANDARD 已成功前缀和数据行 watermark。不能拒绝合法 options 或将0行报成功掩盖问题。
-- [ ] 运行上述回归及已有 Excel execution/reader contract tests，确认0fail/errors；生成补丁、diff --check、自查，保存 task-1-report.md 和 patch。不stage/commit/push，不操作root worktree，不派发子代理。
+- [x] 先在 ExcelImportSheetContractTest/XLSXImporterExecutionTest 或独立 owning-module fixture 测试中生成真实 XLS/XLSX：无表头首行必须入库；前导说明行+headerRow；行范围外不入库；列范围重映射与预览相同。预期值手工定义，不调用生产 helper 生成 expected。
+- [x] 运行 Java17 Maven focused tests，确认正确原因失败；记录非零 test count、失败断言和日志。
+- [x] 最小修复执行与预览共用 reader 语义，保留 typed/null/date/number 处理、sheet 选择、取消、STANDARD 已成功前缀和数据行 watermark。不能拒绝合法 options 或将0行报成功掩盖问题。
+- [x] 运行上述回归及已有 Excel execution/reader contract tests，确认0fail/errors；生成补丁、diff --check、自查，保存 task-1-report.md 和 patch。不stage/commit/push，不操作root worktree，不派发子代理。
 
 ### Task 2: staging 任务所有权与过期回收（第一批）
 
@@ -397,10 +397,10 @@ mvn -B -o -f chat2db-community-server/pom.xml -pl '<module>' -am \
 
 现 claimForTask(String fileId) 创建空 marker，无 taskId/续租。canDelete 仅按 marker>7d删；TaskService.resume 对 PENDING+checkpoint 无7d限制，LocalTaskManager 保留恢复资源。必须区分 running/resumable/terminal/真正orphan，原24h unclaimed清理保留。
 
-- [ ] 先补真实持久 marker/TaskStorage fixture：已claim且运行或可恢复8天不删除；无任务owner旧文件可回收；重启重建服务后仍保留；失败提交/成功取消删除清理幂等；旧marker兼容保守不误删。
-- [ ] 基于现实现运行失败测试，记录red证据，不仅断言mock调用或人为宣布owner消失。
-- [ ] 沿 domain API/storage 边界做最小所有权查询或持久关联。可采用已存在任务 spec 的 fileId 引用做权威所有者检查，避免无必要地增加所有 TaskStorage implementor 的抽象方法；查询失败保守保留。处理claim到任务提交之间的窗口、旧marker/进程重启、终态释放。不得仅touch mtime掩盖长期恢复，也不能只永久保留所有orphan导致配额无法回收。
-- [ ] focused tests检查非零数量/0fail，再涵盖submission/lifecycle/storage相关契约；patch+diff--check+task-2-report.md。不要stage/commit/push、派发子代理、读取用户实际数据。
+- [x] 先补真实持久 marker/TaskStorage fixture：已claim且运行或可恢复8天不删除；无任务owner旧文件可回收；重启重建服务后仍保留；失败提交/成功取消删除清理幂等；旧marker兼容保守不误删。
+- [x] 基于现实现运行失败测试，记录red证据，不仅断言mock调用或人为宣布owner消失。
+- [x] 沿 domain API/storage 边界做最小所有权查询或持久关联。可采用已存在任务 spec 的 fileId 引用做权威所有者检查，避免无必要地增加所有 TaskStorage implementor 的抽象方法；查询失败保守保留。处理claim到任务提交之间的窗口、旧marker/进程重启、终态释放。不得仅touch mtime掩盖长期恢复，也不能只永久保留所有orphan导致配额无法回收。
+- [x] focused tests检查非零数量/0fail，再涵盖submission/lifecycle/storage相关契约；patch+diff--check+task-2-report.md。不要stage/commit/push、派发子代理、读取用户实际数据。
 
 ### Task 3: JSON 规范化键碰撞（第一批）
 
@@ -408,10 +408,10 @@ mvn -B -o -f chat2db-community-server/pom.xml -pl '<module>' -am \
 
 当前 trim+lowercase 将原始 Name/name 和首尾空白别名映射同一index，cells.put静默覆盖。保留单一 key 的大小写兼容、unknown diagnostics、typed/null原生值。重点同一record、source mapping/header规范化碰撞，不能把它与JSON原文完全相同重复键的规范混淆。
 
-- [ ] 用真实 JSONImporter/H2 fixture 或现有 importer execution harness 验证 {"Name":"A","name":"B"} 明确报冲突而不写B，首尾空白/映射header同理；保留单个 Name→name 正常匹配、数字布尔null和unknown用例。
-- [ ] 运行baseline red并记录正确失败原因。
-- [ ] 生成cells和header index之前检测collision，错误包含行号/冲突原名称；显式映射若不能唯一消歧则明确拒绝，不引入 silent last-wins。
-- [ ] 运行JSONKeyMatching/JSON extension/reader/typed执行回归，非零0fail；patch+diff--check+task-3-report.md。不stage/commit/push，不派发子代理。
+- [x] 用真实 JSONImporter/H2 fixture 或现有 importer execution harness 验证 {"Name":"A","name":"B"} 明确报冲突而不写B，首尾空白/映射header同理；保留单个 Name→name 正常匹配、数字布尔null和unknown用例。
+- [x] 运行baseline red并记录正确失败原因。
+- [x] 生成cells和header index之前检测collision，错误包含行号/冲突原名称；显式映射若不能唯一消歧则明确拒绝，不引入 silent last-wins。
+- [x] 运行JSONKeyMatching/JSON extension/reader/typed执行回归，非零0fail；patch+diff--check+task-3-report.md。不stage/commit/push，不派发子代理。
 
 ### Task 4: JCEF 来源边界验证（第二批）
 
@@ -462,3 +462,27 @@ single preview、multi upload和目标列表失败可明确retry，只重试失�
 ### 第二批阶段证据（尚未完成整体验收）
 
 JCEF 在 native handler 和 backend bridge 共用入口同步检查有效主 frame、application browser 与来源；仅打包 index 精确路径或配置的 loopback origin 可调用。拒绝403并消费query；导航/销毁的旧query取消保持清理。定向10例全过；JCEF及其依赖 enabled-tests package 共343例，其中335例通过、8例因平台/fixture条件跳过。实际 Chromium/安装包未运行，不把URI测试或package记为native通过。真实方言 IT、应用启动/浏览器闭环及第三批事项仍按上列任务继续。
+
+
+### 第三批集成证据与未完成边界（2026-10-13）
+
+- 多表每个 CSV source 的选项、预览与列映射独立保存；修改目标或选项仅使对应预览/映射失效。成功上传保留，目标列表、失败上传与单文件预览可明确原地重试。17 个新 helper 用例及既有向导契约通过；两组 headless 页面实际点击契约分别通过 4 和 6 项检查，但 metadata/upload/preview 为模拟接口，没有执行数据库任务。
+- 后端完整 scoped manifest/staging 路径传递并执行每个源的 encoding、delimiter、header/range、日期/小数与 NULL 设置。canonical shard 用 UTF-8 与固定解析选项，不重复套用源范围；quoted empty 与 unquoted NULL 不二次混淆，`nullString=""` 仍优先。新增真实 H2 SCHEMA/DATABASE/staging 及失败策略回归。
+- SKIP 且已有外层事务时，每批/逐行重放建立保存点，失败先回滚当前尝试再重试；建立或回滚保存点失败立即终止，不把故障算普通坏行或继续写入。真实 H2 回归证明坏值只计一次、之前 500 行及有效后续行保留；未把此证据当作 PostgreSQL/MySQL 或跨 shard 崩溃恢复已通过。
+- cancel/control API 根据任务归属、运行状态、commit/recovery 保护决定可取消性；排队任务终态并释放资源，运行任务先请求取消，UI 等待真实终态。暂停明确不支持。动态上传能力来自实际 staging/multipart 配置；浏览器/桌面、单表/多表按当前选择总量重新校验，失败采用保守回退。准入面板显示 requested/effective mode 与每项 message/evidence/remediation，五种语言沿现有 i18n。
+- Java17 Maven core+web `package` 明确启用测试、覆盖 includes 与 failure-ignore，fresh 259 个 XML 共 **2144/0/0/0**（core734、web111）；`yarn run lint` exit0、`yarn run build:web:community --app_version=0.0.0` exit0，生产 bundle 检查通过。未运行最新 jar 的 HTTP 或 native 验收。
+- 用户指南与 portable fixture/真实单表浏览器 runner 已加入；fixture 归属清理测试 3 例通过，runner 仅做语法检查。已有本机 H2 staging 12 轮基线是最终 typed-binding 修复前采样，需最终源码复测；没有符合准入的 ULTRA_FAST 样本或真实数据库性能结论。
+- Docker 遗留 socket 清理虽已获用户授权，实际删除命令被工具策略拒绝，未执行；后台启动故障未恢复。真实 MySQL 下载、多表、坏行、响应丢失与取消浏览器闭环保持未完成。提供方 Actions 使用限制、JCEF/native 平台缺口单独保留。
+
+接续首项需补充 SKIP 逐行重放时的取消回归：`ImportRowBatcher.replayIndividually` 当前 `catch(RuntimeException)` 未单独传播 `TaskCancelledException`，可能把已请求取消后的剩余行记为 reject。外层 token 的最终 CANCELLED 不能替代及时退出与准确 reject/progress；该风险尚未修复，不能把新取消入口宣布为全部执行路径已验收。先用真实 H2/受控 JDBC 取消 fixture 复现，再最小修复并重跑 owning core+web 门禁，随后进行性能复测、运行时 HTTP、层级传播与现有 PR 更新。
+
+
+### 用户要求暂停后的落盘（2026-10-13）
+
+用户明确要求“当前节点完成后，先落盘到文档完成情况，并暂时停止一下任务”。本次收尾节点为第三批本地源码集成、已执行的联合验证与提交，随后暂停；其余验收和对外更新保持待办。
+
+当前根分支 `codex/fn-14-repo-hygiene`。第三批 backend/API/H2 回归提交 `d81181553`，client services/helper 提交 `a0b7d2f57`，UI/i18n/定向测试提交 `3983cc71d`；本节随指南和验收工具提交。此批尚未传播到 fn09–fn13、推送远端或更新现有 PR。上批已发布 fn14 为 `b42029ce780dd79340db478b0b6ba14e95555f39`，该记录是前批回执，不代替恢复任务后的实时远端复验。
+
+恢复顺序：先核验聊天轮转与 root/worktree/分支/脏状态；处理 SKIP replay cancellation 回归与修复，重跑明确启用测试的 core+web package；再复测最终 H2 baseline、构建新 startup jar 并做真实 capability/control HTTP 验收。Docker 恢复后执行真实 MySQL 单/多表、下载、坏行、响应丢失和取消浏览器验收。通过对应门禁后再按现有授权将语义提交传播到所属 fn 层、推送并更新现有 PR，复查提供方 CI。native、真实新 PG/MySQL 保存点和符合准入的 ULTRA_FAST 性能缺口继续明确记录。
+
+详细原始命令、XML 统计、失败证据、进程/fixture 归属及补丁标识保存在本机 `.superpowers/sdd/vibecoding/progress.md`。该目录按已有规则保持本地，源码、用户指南与本文件是版本化产物。没有把暂停解释为全部计划完成。

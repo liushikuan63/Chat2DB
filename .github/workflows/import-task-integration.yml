@@ -28,6 +28,7 @@ jobs:
         run: |
           python3 -B script/test/test-verify-import-it-reports.py
           python3 -B script/test/test-run-import-it-cleanup.py
+          python3 -B script/test/test-import-browser-fixture.py
       - name: Test real MySQL, PostgreSQL and MariaDB fixtures and verify nonzero reports
         run: python3 script/test/run-import-it.py
       - name: Upload integration evidence

@@ -92,3 +92,6 @@ derby.log
 /.playwright-cli/
 /wiki/
 /nav-benchmark/
+# Browser acceptance evidence is generated locally; source runner is versioned.
+/target/import-browser-evidence/
+/script/test/__pycache__/
