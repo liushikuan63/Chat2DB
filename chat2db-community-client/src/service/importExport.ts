@@ -32,6 +32,16 @@ export interface TaskListParams {
   status?: string;
 }
 
+export interface TaskControlState {
+  taskId: number;
+  status: string;
+  cancelSupported: boolean;
+  cancellationRequested: boolean;
+  pauseSupported: boolean;
+  reason: 'READY' | 'CANCELLATION_REQUESTED' | 'COMMIT_IN_PROGRESS' | 'RECOVERY_IN_PROGRESS' | 'TERMINAL' | 'NOT_EXECUTING';
+  pauseReason: string;
+}
+
 export interface TaskSubmissionResponse {
   taskId: number;
 }
@@ -123,6 +133,8 @@ const getTaskEvents = createRequest<TaskEventListParams, ImportExportTaskEvent[]
 });
 
 const deleteTask = createRequest<TaskIdParams, void>('/api/tasks/delete', { method: 'delete' });
+const getTaskControl = createRequest<TaskIdParams, TaskControlState>('/api/tasks/control', { method: 'get', errorLevel: false });
+const cancelTask = createRequest<TaskIdParams, TaskControlState>('/api/tasks/cancel', { method: 'post', errorLevel: false });
 const getActiveTaskCount = createRequest<void, number>('/api/tasks/active-count', { method: 'get', errorLevel: false });
 const prepareUserExit = createRequest<void, void>('/api/tasks/prepare-user-exit', {
   method: 'post',
@@ -160,6 +172,8 @@ export default {
   getTaskDetails,
   getTaskEvents,
   deleteTask,
+  getTaskControl,
+  cancelTask,
   getActiveTaskCount,
   prepareUserExit,
   abortUserExit,

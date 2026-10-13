@@ -27,6 +27,32 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 class TaskWebConverterTest {
 
     @Test
+    void serializedMultiTableRequestPreservesIndependentCsvOptions() throws Exception {
+        var request = new com.fasterxml.jackson.databind.ObjectMapper().readValue("""
+                {"scope":"SCHEMA","dataSourceId":1,"databaseName":"fixture","schemaName":"PUBLIC",
+                 "format":"CSV","tableSources":[
+                  {"tableName":"PARENT","fileId":"parent-file",
+                   "csvOptions":{"encoding":"UTF-16LE","delimiter":";","headerRow":2,
+                                 "dataStartRow":4,"dataEndRow":5}},
+                  {"tableName":"CHILD","fileId":"child-file",
+                   "csvOptions":{"encoding":"windows-1252","delimiter":"|","hasHeader":false,
+                                 "dataStartRow":1}}
+                 ]}
+                """, TaskImportRequest.class);
+        var sources = new TaskWebConverter().importRequest2spec(request).getTableSources();
+        assertEquals("parent-file", sources.get(0).getImportFileId());
+        assertEquals("UTF-16LE", sources.get(0).getCsvOptions().getEncoding());
+        assertEquals(";", sources.get(0).getCsvOptions().getDelimiter());
+        assertEquals(2, sources.get(0).getCsvOptions().getHeaderRow());
+        assertEquals(4, sources.get(0).getCsvOptions().getDataStartRow());
+        assertEquals(5, sources.get(0).getCsvOptions().getDataEndRow());
+        assertEquals("child-file", sources.get(1).getImportFileId());
+        assertEquals("windows-1252", sources.get(1).getCsvOptions().getEncoding());
+        assertEquals("|", sources.get(1).getCsvOptions().getDelimiter());
+        assertEquals(false, sources.get(1).getCsvOptions().getHasHeader());
+    }
+
+    @Test
     void importPreviewPreservesStagedSourceAndNullStrategy() {
         var request = new ai.chat2db.community.web.api.model.request.task.TaskImportRequest();
         request.setClientSubmissionId("  import-attempt-1  ");

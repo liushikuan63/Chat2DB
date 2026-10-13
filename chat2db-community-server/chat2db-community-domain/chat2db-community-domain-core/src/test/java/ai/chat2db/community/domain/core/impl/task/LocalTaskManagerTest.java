@@ -100,6 +100,173 @@ class LocalTaskManagerTest {
     }
 
     @Test
+    void cancelQueuedTaskImmediatelyCleansResourcesAndFreesQueueCapacity() throws Exception {
+        TestTaskStorage storage = new TestTaskStorage();
+        CountDownLatch started = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        AtomicLong executed = new AtomicLong();
+        AtomicLong cleaned = new AtomicLong();
+        Path stagedSource = Files.writeString(tempDirectory.resolve("queued-source.csv"), "id\n1\n");
+        taskManager = manager(storage, (spec, context) -> {
+            executed.incrementAndGet();
+            started.countDown();
+            awaitRelease(release);
+        }, emptyExtensionManager(), 1, 1, () -> {
+            cleaned.incrementAndGet();
+            try { Files.deleteIfExists(stagedSource); }
+            catch (java.io.IOException failure) { throw new java.io.UncheckedIOException(failure); }
+        });
+        Task first = newTask();
+        Task queued = newTask();
+        taskManager.submit(first, event("TASK_CREATED"), spec(), null, null);
+        assertTrue(started.await(5, TimeUnit.SECONDS));
+        taskManager.submit(queued, event("TASK_CREATED"), spec(), null, null);
+        try {
+            assertTrue(taskManager.control(queued.getId()).isCancelSupported());
+            assertFalse(taskManager.control(queued.getId()).isPauseSupported());
+            assertEquals("CANCELLED", taskManager.cancel(queued.getId()).getStatus());
+            assertEquals(1, cleaned.get());
+            assertFalse(Files.exists(stagedSource));
+            assertEquals("CANCELLED", taskManager.cancel(queued.getId()).getStatus());
+            assertEquals(1, cleaned.get(), "retries must not double-clean the queued resource");
+            assertEquals(1, executed.get(), "cancelled queued task must never execute");
+            taskManager.submit(newTask(), event("TASK_CREATED"), spec(), null, null);
+            assertEquals("RUNNING", storage.get(first.getId()).orElseThrow().getStatus());
+        } finally {
+            release.countDown();
+        }
+    }
+
+    @Test
+    void cancelRunningTaskSignalsStatementButWaitsForActualTerminalAndKeepsCommittedPrefix() throws Exception {
+        TestTaskStorage storage = new TestTaskStorage();
+        CountDownLatch started = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        CountDownLatch statementCancelled = new CountDownLatch(1);
+        try (java.sql.Connection database = java.sql.DriverManager.getConnection(
+                "jdbc:h2:mem:cancel_prefix_" + java.util.UUID.randomUUID())) {
+            database.createStatement().execute("CREATE TABLE committed_prefix (id INT PRIMARY KEY)");
+            taskManager = manager(storage, (spec, context) -> {
+                try {
+                    database.createStatement().executeUpdate("INSERT INTO committed_prefix VALUES (1)");
+                } catch (java.sql.SQLException failure) { throw new RuntimeException(failure); }
+                java.sql.Statement statement = (java.sql.Statement) java.lang.reflect.Proxy.newProxyInstance(
+                        getClass().getClassLoader(), new Class<?>[]{java.sql.Statement.class}, (proxy, method, args) -> {
+                            if (method.getName().equals("hashCode")) return System.identityHashCode(proxy);
+                            if (method.getName().equals("equals")) return proxy == args[0];
+                            if (method.getName().equals("cancel")) statementCancelled.countDown();
+                            return null;
+                        });
+                context.onStatementCreated(statement);
+                started.countDown();
+                awaitRelease(release);
+                context.checkCancelled();
+            });
+            Task task = newTask();
+            taskManager.submit(task, event("TASK_CREATED"), spec(), null, null);
+            assertTrue(started.await(5, TimeUnit.SECONDS));
+            try {
+                var firstCancel = java.util.concurrent.CompletableFuture.supplyAsync(() -> taskManager.cancel(task.getId()));
+                var secondCancel = java.util.concurrent.CompletableFuture.supplyAsync(() -> taskManager.cancel(task.getId()));
+                var accepted = firstCancel.get(5, TimeUnit.SECONDS);
+                assertTrue(secondCancel.get(5, TimeUnit.SECONDS).isCancellationRequested());
+                assertEquals("RUNNING", accepted.getStatus());
+                assertTrue(accepted.isCancellationRequested());
+                assertTrue(statementCancelled.await(5, TimeUnit.SECONDS));
+                assertTrue(taskManager.cancel(task.getId()).isCancellationRequested());
+                assertEquals("RUNNING", storage.get(task.getId()).orElseThrow().getStatus());
+            } finally { release.countDown(); }
+            assertTrue(storage.awaitTerminal());
+            assertEquals("CANCELLED", storage.get(task.getId()).orElseThrow().getStatus());
+            assertEquals(1, storage.terminalTransitionCount());
+            assertEquals(1, storage.listEvents(task.getId(), 0, 100).stream()
+                    .filter(event -> "TASK_CANCELLATION_REQUESTED".equals(event.getCode())).count());
+            try (var rows = database.createStatement().executeQuery("SELECT COUNT(*) FROM committed_prefix")) {
+                assertTrue(rows.next()); assertEquals(1, rows.getInt(1));
+            }
+            assertTrue(storage.get(task.getId()).orElseThrow().getProgressMessage().contains("committed"));
+        }
+    }
+
+    @Test
+    void singleTaskCancelCannotCrossCommitProtectionAndSuccessStaysImmutable() throws Exception {
+        TestTaskStorage storage = new TestTaskStorage();
+        CountDownLatch committed = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        AtomicBoolean cancelledResource = new AtomicBoolean();
+        taskManager = manager(storage, (spec, context) -> {
+            context.registerCancelable(() -> cancelledResource.set(true));
+            context.enterCommitPhase();
+            committed.countDown();
+            awaitRelease(release);
+            context.checkCancelled();
+        });
+        Task task = newTask();
+        taskManager.submit(task, event("TASK_CREATED"), spec(), null, null);
+        assertTrue(committed.await(5, TimeUnit.SECONDS));
+        try {
+            var response = taskManager.cancel(task.getId());
+            assertEquals("COMMIT_IN_PROGRESS", response.getReason());
+            assertFalse(response.isCancelSupported());
+            assertFalse(response.isCancellationRequested());
+            assertFalse(cancelledResource.get());
+        } finally { release.countDown(); }
+        assertTrue(storage.awaitTerminal());
+        assertEquals("SUCCESS", taskManager.cancel(task.getId()).getStatus());
+        assertEquals(1, storage.terminalTransitionCount());
+    }
+
+    @Test
+    void cancellationBeforeCommitEntryPreventsIrreversibleWork() throws Exception {
+        TestTaskStorage storage = new TestTaskStorage();
+        CountDownLatch ready = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        AtomicBoolean irreversible = new AtomicBoolean();
+        taskManager = manager(storage, (spec, context) -> {
+            ready.countDown();
+            awaitRelease(release);
+            context.enterCommitPhase();
+            irreversible.set(true);
+        });
+        Task task = newTask();
+        taskManager.submit(task, event("TASK_CREATED"), spec(), null, null);
+        assertTrue(ready.await(5, TimeUnit.SECONDS));
+        try { assertTrue(taskManager.cancel(task.getId()).isCancellationRequested()); }
+        finally { release.countDown(); }
+        assertTrue(storage.awaitTerminal());
+        assertEquals("CANCELLED", storage.get(task.getId()).orElseThrow().getStatus());
+        assertFalse(irreversible.get());
+    }
+
+    @Test
+    void cancelUnscheduledResumablePendingTaskAndRejectUnknownId() {
+        TestTaskStorage storage = new TestTaskStorage();
+        taskManager = manager(storage, (spec, context) -> {});
+        Task task = newTask();
+        storage.create(task, event("TASK_CREATED"));
+        assertEquals("CANCELLED", taskManager.cancel(task.getId()).getStatus());
+        assertEquals("CANCELLED", taskManager.cancel(task.getId()).getStatus());
+        assertEquals(1, storage.terminalTransitionCount());
+        assertEquals("SAFE_PAUSE_UNSUPPORTED", taskManager.control(task.getId()).getPauseReason());
+        assertThrows(ai.chat2db.community.tools.exception.DataNotFoundException.class,
+                () -> taskManager.cancel(999L));
+    }
+
+    private static void awaitRelease(CountDownLatch release) {
+        boolean interrupted = false;
+        try {
+            while (true) {
+                try {
+                    if (!release.await(5, TimeUnit.SECONDS)) throw new AssertionError("test release timed out");
+                    return;
+                } catch (InterruptedException cancellation) { interrupted = true; }
+            }
+        } finally {
+            if (interrupted) Thread.currentThread().interrupt();
+        }
+    }
+
+    @Test
     void successfulTaskHasOneImmutableTerminalResult() throws Exception {
         TestTaskStorage storage = new TestTaskStorage();
         taskManager = manager(storage, (spec, context) -> {});

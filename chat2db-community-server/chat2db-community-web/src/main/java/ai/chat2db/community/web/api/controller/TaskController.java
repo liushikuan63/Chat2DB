@@ -6,6 +6,7 @@ import ai.chat2db.community.domain.api.model.task.Task;
 import ai.chat2db.community.domain.api.model.task.TaskArtifact;
 import ai.chat2db.community.domain.api.model.task.TaskEvent;
 import ai.chat2db.community.domain.api.model.task.TaskQuery;
+import ai.chat2db.community.domain.api.model.task.TaskControlState;
 import ai.chat2db.community.domain.api.service.task.IImportTaskSubmissionService;
 import ai.chat2db.community.domain.api.service.task.TaskService;
 import ai.chat2db.community.tools.wrapper.result.ActionResult;
@@ -78,6 +79,16 @@ public class TaskController {
     @PostMapping("/resume")
     public DataResult<TaskSubmitResponse> resume(@RequestBody @Valid TaskIdRequest request) {
         return DataResult.of(new TaskSubmitResponse(taskService.resume(request.getTaskId())));
+    }
+
+    @PostMapping("/cancel")
+    public DataResult<TaskControlState> cancel(@RequestBody @Valid TaskIdRequest request) {
+        return DataResult.of(taskService.cancel(request.getTaskId()));
+    }
+
+    @GetMapping("/control")
+    public DataResult<TaskControlState> control(@Valid TaskIdRequest request) {
+        return DataResult.of(taskService.control(request.getTaskId()));
     }
 
     @GetMapping("/list")

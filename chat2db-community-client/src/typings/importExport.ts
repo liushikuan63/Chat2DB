@@ -95,6 +95,7 @@ export interface IImportTableSource {
   displayFileName?: string;
   format: ImportExportFileType;
   dataTimeFormat?: string;
+  csvOptions?: ICsvOptions;
   columnMappings?: IImportColumnMapping[];
   unmappedTarget?: 'DEFAULT' | 'NULL';
   options?: IImportOptions;

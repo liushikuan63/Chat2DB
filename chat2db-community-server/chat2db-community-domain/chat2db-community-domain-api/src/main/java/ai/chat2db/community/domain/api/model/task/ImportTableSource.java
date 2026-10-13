@@ -36,4 +36,6 @@ public class ImportTableSource {
     private UnmappedTargetStrategy unmappedTarget;
 
     private ImportOptions options;
+
+    private CsvOptions csvOptions;
 }
