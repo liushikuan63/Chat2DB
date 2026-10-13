@@ -315,6 +315,111 @@ class ImportFileStagingServiceTest {
     }
 
     @Test
+    void uppercaseSqlOwnerIdentityRetainsAnExpiredSourceAfterRestart() throws Exception {
+        assertUppercaseOwnerSurvivesRestart(false);
+    }
+
+    @Test
+    void uppercaseTableSourceOwnerIdentityRetainsAnExpiredSourceAfterRestart() throws Exception {
+        assertUppercaseOwnerSurvivesRestart(true);
+    }
+
+    private void assertUppercaseOwnerSurvivesRestart(boolean tableSource) throws Exception {
+        System.setProperty("user.home", tempDirectory.toString());
+        String storagePath = tempDirectory.resolve("case-owner-fixture").toString();
+        FileTaskStorage storage = new FileTaskStorage(storagePath);
+        ImportFileStagingService service = withStorage(storage);
+        File source = Files.writeString(tempDirectory.resolve("case-owned.sql"), "SELECT 1;\n").toFile();
+        String id = service.stage(source, "case-owned.sql");
+        Path staged = service.resolve(id).toPath();
+        service.claimForTask(id);
+        String ownerId = id.toUpperCase(java.util.Locale.ROOT);
+        ImportTaskSpec spec = ImportTaskSpec.builder().build();
+        if (tableSource) spec.setTableSources(List.of(ImportTableSource.builder().importFileId(ownerId).build()));
+        else spec.setImportFileId(ownerId);
+        Task task = storage.create(Task.builder().type(tableSource ? "DATA_FILE_IMPORT" : "SQL_FILE_IMPORT")
+                .specJson(JSON.toJSONString(spec)).build(), new TaskEvent());
+        assertTrue(storage.compareAndSetStatus(task.getId(), "PENDING", "RUNNING", new TaskStatusPatch(), new TaskEvent()));
+        ageClaim(staged, id);
+        ImportFileStagingService restarted = withStorage(new FileTaskStorage(storagePath));
+        assertEquals("SELECT 1;\n", Files.readString(restarted.resolve(id).toPath()));
+        assertFalse(restarted.releaseUnclaimed(id));
+    }
+
+    @Test
+    void h2OwnerRetainsExpiredSqlSourceAcrossReopenThenTerminalCleanupReclaimsIt() throws Exception {
+        System.setProperty("user.home", tempDirectory.toString());
+        assertTrue(Path.of(ai.chat2db.community.tools.util.ConfigUtils.getEnvBasePath()).toAbsolutePath()
+                .normalize().startsWith(tempDirectory.toAbsolutePath().normalize()), "H2 fixture must stay inside the test home");
+        String id;
+        Path staged;
+        Long taskId;
+        try (var storage = new ai.chat2db.community.storage.task.H2TaskStorage()) {
+            ImportFileStagingService service = new ImportFileStagingService(storage);
+            File source = Files.writeString(tempDirectory.resolve("h2-owned.sql"), "SELECT 1;\n").toFile();
+            id = service.stage(source, "h2-owned.sql");
+            staged = service.resolve(id).toPath();
+            service.claimForTask(id);
+            Task task = storage.create(Task.builder().type("SQL_FILE_IMPORT")
+                    .specJson(JSON.toJSONString(ImportTaskSpec.builder().importFileId(id).build())).build(), new TaskEvent());
+            taskId = task.getId();
+            assertTrue(storage.compareAndSetStatus(taskId, "PENDING", "RUNNING", new TaskStatusPatch(), new TaskEvent()));
+            ageClaim(staged, id);
+        }
+        try (var reopened = new ai.chat2db.community.storage.task.H2TaskStorage()) {
+            ImportFileStagingService service = new ImportFileStagingService(reopened);
+            assertEquals("RUNNING", reopened.get(taskId).orElseThrow().getStatus());
+            assertEquals("SELECT 1;\n", Files.readString(service.resolve(id).toPath()));
+            assertFalse(service.releaseUnclaimed(id));
+            assertTrue(reopened.compareAndSetStatus(taskId, "RUNNING", "SUCCESS", new TaskStatusPatch(), new TaskEvent()));
+            assertThrows(BusinessException.class, () -> service.resolve(id));
+            assertFalse(Files.exists(staged));
+            assertFalse(Files.exists(staged.resolveSibling(id + ".claimed")));
+        }
+    }
+
+    @Test
+    void anotherTasksDifferentIdentityDoesNotRetainAnExpiredOrphan() throws Exception {
+        System.setProperty("user.home", tempDirectory.toString());
+        FileTaskStorage storage = new FileTaskStorage(tempDirectory.resolve("different-owner").toString());
+        ImportFileStagingService service = withStorage(storage);
+        File source = Files.writeString(tempDirectory.resolve("orphan.sql"), "SELECT 1;\n").toFile();
+        String orphan = service.stage(source, "orphan.sql");
+        Path orphanPath = service.resolve(orphan).toPath();
+        service.claimForTask(orphan);
+        String owned = service.stage(source, "owned.sql");
+        Path ownedPath = service.resolve(owned).toPath();
+        service.claimForTask(owned);
+        storage.create(Task.builder().type("SQL_FILE_IMPORT")
+                .specJson(JSON.toJSONString(ImportTaskSpec.builder().importFileId(owned).build())).build(), new TaskEvent());
+        ageClaim(orphanPath, orphan);
+        ageClaim(ownedPath, owned);
+        assertThrows(BusinessException.class, () -> service.resolve(orphan));
+        assertFalse(Files.exists(orphanPath));
+        assertFalse(Files.exists(orphanPath.resolveSibling(orphan + ".claimed")));
+        assertEquals("SELECT 1;\n", Files.readString(service.resolve(owned).toPath()));
+    }
+
+    @Test
+    void rejectsASymbolicStagedFileAndReleaseLeavesItsTargetIntact() throws Exception {
+        System.setProperty("user.home", tempDirectory.toString());
+        ImportFileStagingService service = new ImportFileStagingService();
+        File source = Files.writeString(tempDirectory.resolve("private-fixture.sql"), "SELECT 73;\n").toFile();
+        String id = service.stage(source, "uploaded.sql");
+        Path staged = service.resolve(id).toPath();
+        assertTrue(service.releaseUnclaimed(id));
+        try {
+            Files.createSymbolicLink(staged, source.toPath());
+        } catch (java.nio.file.FileSystemException | UnsupportedOperationException unavailable) {
+            org.junit.jupiter.api.Assumptions.assumeTrue(false, "This platform cannot create a symbolic-link fixture");
+        }
+        assertThrows(BusinessException.class, () -> service.resolve(id));
+        assertTrue(service.releaseUnclaimed(id));
+        assertFalse(Files.exists(staged, java.nio.file.LinkOption.NOFOLLOW_LINKS));
+        assertEquals("SELECT 73;\n", Files.readString(source.toPath()));
+    }
+
+    @Test
     void expiredRunningOwnerKeepsSourceAfterStorageAndServiceRestart() throws Exception {
         assertExpiredOwnerSurvivesRestart(false);
     }

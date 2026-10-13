@@ -122,6 +122,16 @@ mvn -B -f chat2db-community-server/pom.xml -pl :chat2db-community-domain-core -a
 
 ## 核心事务与取消审查补充（2026-10-14）
 
+## 导入文件生命周期补充（2026-10-14）
+
+文件归属按完整 UUID 识别，允许其已有合法大小写形式；顶层 SQL 导入和 tableSources 的持久任务引用不会因大小写不同在 claim 宽限期后被误判为孤儿。resolve 只接受 staged 路径中的普通文件，不跟随最终文件符号链接；release 删除链接本身，保留链接目标。
+
+当前文件生命周期 26 个测试、完整 owning gate 2260 项，均零失败／错误／跳过。新增测试实际验证 File 存储重建、大写归属、H2 存储关闭重开后的活跃 SQL 源保留及 SUCCESS 终态回收、不同 UUID 的孤儿回收、真实符号链接拒绝与目标保留。24 小时未 claim 清理、7 天孤儿宽限期、活跃／可恢复任务保留、查询失败保守保留、配额和 claim/release 并发规则继续生效。
+
+这些是资源生命周期与持久存储验证，不代替异步导入进程重启、浏览器或真实 SQL Server 验收。父目录链接、检查后文件替换、hard link/junction 等本地文件系统边界没有据此宣称全面覆盖。
+
+### 核心事务与取消审查
+
 批次执行返回后、提交前重新检查取消；在该边界已经观察到取消时，回滚当前自管理块并恢复连接状态，保留此前已提交的块。真实 H2 回归覆盖“执行成功、关闭通知时取消”的窗口，原块间取消测试依据实际 commit 事件判断，不依赖取消检查的调用次数。
 
 SQL Server 插件提供同一连接的 `SELECT @@TRANCOUNT` 只读探针，覆盖命名保存点回滚和嵌套事务内层 COMMIT；探针设置 5 秒超时、登记可取消 Statement，读取失败则终止导入。其他插件通过兼容的 default SPI 方法沿用通用脚本状态；JDBC autoCommit=false 保留调用者事务。方言 SQL 保留在 SQL Server 插件，参见 [Microsoft 事务计数契约](https://learn.microsoft.com/en-us/sql/t-sql/functions/trancount-transact-sql)。
