@@ -1,3 +1,4 @@
+import { sourcePreviewKey } from './sourcePreview';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -47,12 +48,28 @@ const reconciled = reconcileMultiTableSources(
 );
 assert.equal(reconciled[0].id, 'source-2');
 
-const readySources = sources.map((source, index) => ({
-  ...source,
-  targetKey: index === 0 ? usersKey : ordersKey,
-  fileId: `file-${index}`,
-  status: 'READY' as const,
-}));
+const readySources = sources
+  .map((source, index) => ({
+    ...source,
+    targetKey: index === 0 ? usersKey : ordersKey,
+    fileId: `file-${index}`,
+    status: 'READY' as const,
+  }))
+  .map((source) => ({
+    ...source,
+    previewKey: sourcePreviewKey(source),
+    previewStatus: 'READY' as const,
+    columnMappings: { id: 'id' },
+    preview: {
+      fileColumns: ['id'],
+      sampleRows: [],
+      columnMatches: [],
+      missingTableColumns: [],
+      targetColumns: [
+        { name: 'id', dataType: 'INT', nullable: false, autoIncrement: false, defaultValue: null, comment: null },
+      ],
+    },
+  }));
 assert.deepEqual(getMultiTableSourceIssues(readySources), {
   empty: false,
   staging: false,

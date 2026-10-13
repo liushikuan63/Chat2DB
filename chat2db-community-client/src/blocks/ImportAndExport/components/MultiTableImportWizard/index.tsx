@@ -68,6 +68,21 @@ import {
   type MultiTableImportSettings,
 } from './taskParams';
 import { createAsyncTaskLimiter } from './uploadQueue';
+import { useImportUploadCapabilities } from '@/hooks/useImportUploadCapabilities';
+import { checkImportUploadSelection } from '@/utils/importUploadLimits';
+import ImportUploadLimitsNotice from '../ImportUploadLimitsNotice';
+import { createTargetListLoader } from './targetListLoader';
+import { claimCurrentUpload } from './uploadCompletion';
+import {
+  acceptSourcePreview,
+  createSourcePreviewRequests,
+  retrySourceUpload,
+  sourceCsvOptions,
+  sourcePreviewKey,
+  sourcePreviewReady,
+  updateSourceSelection,
+} from './sourcePreview';
+import SourceMappingEditor from './SourceMappingEditor';
 import { useStyles } from './style';
 
 interface MultiTableImportWizardProps {
@@ -80,10 +95,6 @@ interface ColumnMetadataState {
   error?: string;
 }
 
-const MAX_IMPORT_FILES = 1000;
-const MAX_IMPORT_FILE_SIZE_MEGABYTES = 1024;
-const MAX_IMPORT_TOTAL_SIZE_BYTES = 10 * 1024 * 1024 * 1024;
-
 const uniqueTargets = (targets: MultiTableTarget[]) =>
   Array.from(new Map(targets.map((target) => [multiTableTargetKey(target), target])).values()).sort((left, right) =>
     multiTableTargetLabel(left).localeCompare(multiTableTargetLabel(right)),
@@ -92,6 +103,7 @@ const uniqueTargets = (targets: MultiTableTarget[]) =>
 const MultiTableImportWizard = forwardRef(
   ({ boundInfo, setIsReady }: MultiTableImportWizardProps, ref: ForwardedRef<ImportExportFileRef>) => {
     const { styles } = useStyles();
+    const uploadCapabilities = useImportUploadCapabilities('multi');
     const [currentStep, setCurrentStep] = useState(0);
     const [targets, setTargets] = useState<MultiTableTarget[]>([]);
     const [targetsLoading, setTargetsLoading] = useState(true);
@@ -104,6 +116,11 @@ const MultiTableImportWizard = forwardRef(
       defaultMultiTableImportSettingsFor(boundInfo.databaseType),
     );
     const sourceSequence = useRef(0);
+    const sourcesRef = useRef(sources);
+    sourcesRef.current = sources;
+    const targetLoader = useRef<ReturnType<typeof createTargetListLoader>>();
+    const previewRequests = useRef(createSourcePreviewRequests()).current;
+    const previewLimiter = useRef(createAsyncTaskLimiter(3)).current;
     const dependencySequence = useRef(0);
     const requestedColumns = useRef(new Set<string>());
     const metadataGeneration = useRef(0);
@@ -139,10 +156,11 @@ const MultiTableImportWizard = forwardRef(
 
     const releaseAllStagedFiles = useCallback(() => {
       stagingGeneration.current += 1;
+      previewRequests.invalidate();
       activeSourceIds.current.clear();
       stagedFileIdsBySource.current.clear();
       void stagingOwnership.releaseAll();
-    }, [stagingOwnership]);
+    }, [previewRequests, stagingOwnership]);
 
     useEffect(() => {
       mounted.current = true;
@@ -152,85 +170,65 @@ const MultiTableImportWizard = forwardRef(
       };
     }, [releaseAllStagedFiles]);
 
+    const loadTargets = useCallback(() => {
+      const loader = targetLoader.current;
+      if (!loader) return;
+      const generation = metadataGeneration.current;
+      setTargetsLoading(true);
+      setTargetLoadError(undefined);
+      void loader
+        .load()
+        .then(({ targets: loadedTargets, errors }) => {
+          if (!mounted.current || generation !== metadataGeneration.current) return;
+          setTargets(uniqueTargets(loadedTargets));
+          if (errors.length)
+            setTargetLoadError(
+              getImportPreviewErrorMessage(errors[0], i18n('workspace.importExport.multiTable.tableLoadFailed')),
+            );
+        })
+        .finally(() => {
+          if (mounted.current && generation === metadataGeneration.current) setTargetsLoading(false);
+        });
+    }, []);
+
     useEffect(() => {
-      let cancelled = false;
-      const generation = ++metadataGeneration.current;
-      const noTargets = new Set<string>();
+      metadataGeneration.current += 1;
       releaseAllStagedFiles();
       setCurrentStep(0);
       setTargets([]);
       setSources([]);
-      setDependencies((current) => reconcileLogicalDependenciesWithTargets(current, noTargets));
+      setDependencies((current) => reconcileLogicalDependenciesWithTargets(current, new Set()));
       requestedColumns.current.clear();
       setColumnsByTarget({});
       setColumnMetadataByTarget({});
       setSettings((current) => constrainMultiTableSettings(current, boundInfo.databaseType));
-      setTargetsLoading(true);
+      targetLoader.current = undefined;
       setTargetLoadError(undefined);
       if (dataSourceId === undefined) {
         setTargetsLoading(false);
         setTargetLoadError(i18n('workspace.importExport.multiTable.tableLoadFailed'));
-        return () => {};
+        return;
       }
-
-      const loadTables = async () => {
-        const toTargets = (tables: Array<{ name: string }>, schemaName?: string) =>
-          tables.map((table) => ({
+      targetLoader.current = createTargetListLoader(
+        async () => {
+          if (boundInfo.targetScope === 'SCHEMA') return [boundInfo.schemaName];
+          const metadata = await sqlService.getDatabaseSchemaList({ dataSourceId });
+          const database = metadata.databases?.find((item) => item.name === boundInfo.databaseName);
+          const schemas = database?.schemas || metadata.schemas || [];
+          return schemas.length ? schemas.map(({ name }) => name) : [undefined];
+        },
+        async (schemaName) => {
+          const tables = await sqlService.getAllTableList({
+            dataSourceId,
             databaseName: boundInfo.databaseName,
             schemaName,
-            tableName: table.name,
-          }));
-
-        if (boundInfo.targetScope === 'SCHEMA') {
-          const tables = await sqlService.getAllTableList({
-            dataSourceId,
-            databaseName: boundInfo.databaseName,
-            schemaName: boundInfo.schemaName,
           });
-          return toTargets(tables, boundInfo.schemaName);
-        }
-
-        const metadata = await sqlService.getDatabaseSchemaList({ dataSourceId });
-        const database = metadata.databases?.find((item) => item.name === boundInfo.databaseName);
-        const schemas = database?.schemas || metadata.schemas || [];
-        if (!schemas.length) {
-          const tables = await sqlService.getAllTableList({
-            dataSourceId,
-            databaseName: boundInfo.databaseName,
-          });
-          return toTargets(tables);
-        }
-        const tableGroups = await Promise.all(
-          schemas.map(async ({ name }) => {
-            const tables = await sqlService.getAllTableList({
-              dataSourceId,
-              databaseName: boundInfo.databaseName,
-              schemaName: name,
-            });
-            return toTargets(tables, name);
-          }),
-        );
-        return tableGroups.flat();
-      };
-
-      loadTables()
-        .then((loadedTargets) => {
-          if (!cancelled && generation === metadataGeneration.current) {
-            setTargets(uniqueTargets(loadedTargets));
-          }
-        })
-        .catch((error) => {
-          if (!cancelled && generation === metadataGeneration.current) {
-            setTargetLoadError(
-              getImportPreviewErrorMessage(error, i18n('workspace.importExport.multiTable.tableLoadFailed')),
-            );
-          }
-        })
-        .finally(() => {
-          if (!cancelled && generation === metadataGeneration.current) setTargetsLoading(false);
-        });
+          return tables.map((table) => ({ databaseName: boundInfo.databaseName, schemaName, tableName: table.name }));
+        },
+      );
+      loadTargets();
       return () => {
-        cancelled = true;
+        metadataGeneration.current += 1;
       };
     }, [
       boundInfo.databaseName,
@@ -238,6 +236,7 @@ const MultiTableImportWizard = forwardRef(
       boundInfo.schemaName,
       boundInfo.targetScope,
       dataSourceId,
+      loadTargets,
       releaseAllStagedFiles,
     ]);
 
@@ -260,11 +259,7 @@ const MultiTableImportWizard = forwardRef(
       pendingSources.forEach((source) => {
         const generation = stagingGeneration.current;
         uploadLimiter(async () => {
-          if (
-            !mounted.current ||
-            stagingGeneration.current !== generation ||
-            !activeSourceIds.current.has(source.id)
-          ) {
+          if (!mounted.current || stagingGeneration.current !== generation || !activeSourceIds.current.has(source.id)) {
             return undefined;
           }
           return stageSelectedImportFile(
@@ -275,15 +270,20 @@ const MultiTableImportWizard = forwardRef(
         })
           .then((fileId) => {
             if (!fileId) return;
-            stagingOwnership.own(fileId);
             if (
-              !mounted.current ||
-              stagingGeneration.current !== generation ||
-              !activeSourceIds.current.has(source.id)
-            ) {
-              void stagingOwnership.release(fileId);
+              !claimCurrentUpload(
+                fileId,
+                source.id,
+                generation,
+                {
+                  mounted: mounted.current,
+                  generation: stagingGeneration.current,
+                  activeSourceIds: activeSourceIds.current,
+                },
+                stagingOwnership,
+              )
+            )
               return;
-            }
             stagedFileIdsBySource.current.set(source.id, fileId);
             setSources((current) =>
               current.map((item) =>
@@ -304,9 +304,113 @@ const MultiTableImportWizard = forwardRef(
               current.map((item) => (item.id === source.id ? { ...item, status: 'ERROR', error: message } : item)),
             );
           })
-          .finally(() => uploadsInFlight.current.delete(source.id));
+          .finally(() => {
+            uploadsInFlight.current.delete(source.id);
+            // An explicit retry may arrive before the failed attempt releases its pending slot.
+            if (mounted.current && stagingGeneration.current === generation)
+              setSources((current) =>
+                current.some((item) => item.id === source.id && item.status === 'PENDING') ? [...current] : current,
+              );
+          });
       });
     }, [sources, stagingOwnership, uploadLimiter]);
+
+    useEffect(() => {
+      sources.forEach((source) => {
+        if (source.status !== 'READY' || !source.fileId || !source.targetKey || dataSourceId === undefined) return;
+        const key = sourcePreviewKey(source);
+        if (!key) {
+          if (source.previewStatus !== 'ERROR')
+            setSources((current) =>
+              current.map((item) =>
+                item.id === source.id
+                  ? { ...item, previewStatus: 'ERROR', previewError: i18n('workspace.importExport.invalidCsvOptions') }
+                  : item,
+              ),
+            );
+          return;
+        }
+        if (source.previewKey === key && source.previewStatus) return;
+        const target = targets.find((item) => multiTableTargetKey(item) === source.targetKey);
+        if (!target) return;
+        setSources((current) =>
+          current.map((item) =>
+            item.id === source.id
+              ? { ...item, previewKey: key, previewStatus: 'LOADING', preview: undefined, previewError: undefined }
+              : item,
+          ),
+        );
+        previewRequests.run(
+          source.id,
+          key,
+          () =>
+            previewLimiter(async () => {
+              const active = sourcesRef.current.find((item) => item.id === source.id);
+              if (
+                !mounted.current ||
+                !activeSourceIds.current.has(source.id) ||
+                !active ||
+                sourcePreviewKey(active) !== key
+              )
+                throw new Error('Preview superseded');
+              const result = await sqlService.getImportPreview({
+                dataSourceId,
+                databaseName: target.databaseName || boundInfo.databaseName!,
+                schemaName: target.schemaName,
+                tableName: target.tableName,
+                fileId: source.fileId!,
+                csvOptions: sourceCsvOptions(source),
+              });
+              return {
+                fileColumns: result.sourceColumns,
+                sampleRows: result.previewData,
+                targetColumns: result.targetColumns,
+                columnMatches: result.sourceColumns.map((fileColumn) => {
+                  const match = result.suggestedMapping.find((item) => item.sourceColumn === fileColumn);
+                  return { fileColumn, tableColumn: match?.targetColumn, matched: !!match };
+                }),
+                missingTableColumns: [],
+              };
+            }),
+          (preview) => {
+            if (mounted.current)
+              setSources((current) =>
+                current.map((item) => (item.id === source.id ? acceptSourcePreview(item, key, preview) : item)),
+              );
+          },
+          (error) => {
+            if (mounted.current)
+              setSources((current) =>
+                current.map((item) =>
+                  item.id === source.id && sourcePreviewKey(item) === key
+                    ? {
+                        ...item,
+                        previewStatus: 'ERROR',
+                        preview: undefined,
+                        previewError: getImportPreviewErrorMessage(error, i18n('common.text.failure')),
+                      }
+                    : item,
+                ),
+              );
+          },
+        );
+      });
+    }, [boundInfo.databaseName, dataSourceId, previewLimiter, previewRequests, sources, targets]);
+
+    const changeSource = (id: string, patch: Partial<MultiTableSourceDraft>) => {
+      const existing = sourcesRef.current.find((source) => source.id === id);
+      if (
+        existing &&
+        (sourcePreviewKey(existing) !== sourcePreviewKey({ ...existing, ...patch }) ||
+          ('previewStatus' in patch && patch.previewStatus === undefined))
+      ) {
+        previewRequests.invalidate(id);
+        setIsReady?.(false);
+      }
+      setSources((current) =>
+        current.map((source) => (source.id === id ? updateSourceSelection(source, patch) : source)),
+      );
+    };
 
     const targetByKey = useMemo(
       () => new Map(targets.map((target) => [multiTableTargetKey(target), target])),
@@ -410,6 +514,9 @@ const MultiTableImportWizard = forwardRef(
       !dependencyIssues.duplicate &&
       !dependencyIssues.invalidGroup;
     const wizardReady = currentStep === 2 && mappingReady && dependenciesReady;
+    const uploadSelectionValid = checkImportUploadSelection(
+      sources.map((source) => source.selection), uploadCapabilities.limits,
+    ).valid;
     const settingsReady =
       hasValidMultiTableNumericSettings(settings) &&
       hasCompatibleMultiTableSettings(settings, boundInfo.databaseType) &&
@@ -417,8 +524,8 @@ const MultiTableImportWizard = forwardRef(
       (settings.cycleStrategy !== 'DEFER_CONSTRAINTS' || deferredConstraintsSupported);
 
     useEffect(() => {
-      setIsReady?.(wizardReady && settingsReady);
-    }, [setIsReady, settingsReady, wizardReady]);
+      setIsReady?.(wizardReady && settingsReady && uploadSelectionValid);
+    }, [setIsReady, settingsReady, wizardReady, uploadSelectionValid]);
 
     useImperativeHandle(ref, () => ({
       invalidateStagedFiles: (message: string) => {
@@ -445,14 +552,14 @@ const MultiTableImportWizard = forwardRef(
         stagingOwnership.transfer(fileIds);
       },
       getValues: (clientSubmissionId?: string) =>
-        buildMultiTableImportParams({
+        uploadSelectionValid ? buildMultiTableImportParams({
           boundInfo,
           clientSubmissionId,
           sources,
           targets,
           dependencies,
           settings,
-        }),
+        }) : null,
     }));
 
     const targetOptions = useMemo(
@@ -480,7 +587,10 @@ const MultiTableImportWizard = forwardRef(
       activeSourceIds.current = nextSourceIds;
       sources
         .filter((source) => !nextSourceIds.has(source.id))
-        .forEach((source) => releaseSourceStagedFile(source.id, source.fileId));
+        .forEach((source) => {
+          previewRequests.invalidate(source.id);
+          releaseSourceStagedFile(source.id, source.fileId);
+        });
       setSources(nextSources);
     };
 
@@ -564,13 +674,29 @@ const MultiTableImportWizard = forwardRef(
           key={[dataSourceId, boundInfo.databaseName, boundInfo.schemaName, boundInfo.targetScope].join(':')}
           accept={MULTI_TABLE_IMPORT_ACCEPT}
           multiple
-          fileSize={MAX_IMPORT_FILE_SIZE_MEGABYTES}
-          maxFiles={MAX_IMPORT_FILES}
-          maxTotalSizeBytes={MAX_IMPORT_TOTAL_SIZE_BYTES}
+          fileSize={uploadCapabilities.limits.fileSize}
+          maxFiles={uploadCapabilities.limits.maxFiles}
+          maxTotalSizeBytes={uploadCapabilities.limits.maxTotalSizeBytes}
+          disabled={uploadCapabilities.limits.disabled}
           fileUrlListChange={handleSelectionsChange}
           description={[i18n('workspace.importExport.multiTable.selectFiles'), MULTI_TABLE_IMPORT_FORMAT]}
         />
-        {targetLoadError && <Alert type="error" showIcon message={targetLoadError} />}
+          <ImportUploadLimitsNotice
+            capabilities={uploadCapabilities}
+            invalid={sources.length > 0 && !uploadSelectionValid}
+          />
+        {targetLoadError && (
+          <Alert
+            type="error"
+            showIcon
+            message={targetLoadError}
+            action={
+              <Button disabled={targetsLoading} onClick={loadTargets}>
+                {i18n('common.button.retry')}
+              </Button>
+            }
+          />
+        )}
         <Table<MultiTableSourceDraft>
           className={styles.sourceTable}
           size="small"
@@ -580,6 +706,17 @@ const MultiTableImportWizard = forwardRef(
           scroll={{ x: 720, y: 220 }}
           dataSource={sources}
           locale={{ emptyText: i18n('workspace.importExport.multiTable.noFiles') }}
+          expandable={{
+            expandedRowRender: (source) => (
+              <SourceMappingEditor
+                source={source}
+                onChange={(patch) => changeSource(source.id, patch)}
+                onRetry={() =>
+                  changeSource(source.id, { previewStatus: undefined, previewKey: undefined, previewError: undefined })
+                }
+              />
+            ),
+          }}
           columns={[
             {
               title: i18n('workspace.importExport.multiTable.file'),
@@ -589,7 +726,55 @@ const MultiTableImportWizard = forwardRef(
             {
               title: i18n('workspace.importExport.multiTable.stagingStatus'),
               width: 120,
-              render: (_, source) => statusTag(source),
+              render: (_, source) => (
+                <>
+                  {statusTag(source)}
+                  {source.status === 'ERROR' && (
+                    <Button
+                      size="small"
+                      onClick={() => {
+                        activeSourceIds.current.add(source.id);
+                        setSources((current) =>
+                          current.map((item) => (item.id === source.id ? retrySourceUpload(item) : item)),
+                        );
+                      }}
+                    >
+                      {i18n('common.button.retry')}
+                    </Button>
+                  )}
+                </>
+              ),
+            },
+            {
+              title: i18n('workspace.importExport.fieldMapping'),
+              width: 150,
+              render: (_, source) =>
+                source.previewStatus === 'ERROR' ? (
+                  <Tooltip title={source.previewError}>
+                    <Button
+                      size="small"
+                      onClick={() =>
+                        changeSource(source.id, {
+                          previewStatus: undefined,
+                          previewKey: undefined,
+                          previewError: undefined,
+                        })
+                      }
+                    >
+                      {i18n('common.button.retry')}
+                    </Button>
+                  </Tooltip>
+                ) : (
+                  <Tag color={sourcePreviewReady(source) ? 'success' : 'warning'}>
+                    {i18n(
+                      sourcePreviewReady(source)
+                        ? 'workspace.importExport.multiTable.statusReady'
+                        : source.previewStatus === 'READY'
+                        ? 'workspace.importExport.unmappedRequired'
+                        : 'workspace.importExport.multiTable.statusPending',
+                    )}
+                  </Tag>
+                ),
             },
             {
               title: i18n('workspace.importExport.multiTable.targetTable'),
@@ -603,11 +788,7 @@ const MultiTableImportWizard = forwardRef(
                   value={source.targetKey}
                   options={targetOptions}
                   status={sourceIssues.duplicateTargets ? 'error' : undefined}
-                  onChange={(targetKey) =>
-                    setSources((current) =>
-                      current.map((item) => (item.id === source.id ? { ...item, targetKey } : item)),
-                    )
-                  }
+                  onChange={(targetKey) => changeSource(source.id, { targetKey })}
                 />
               ),
             },
@@ -711,10 +892,7 @@ const MultiTableImportWizard = forwardRef(
 
           <section className={styles.section}>
             <div className={styles.sectionTitle}>{i18n('workspace.importExport.multiTable.executionMode')}</div>
-            <ImportModeControl
-              value={settings.mode}
-              onChange={(mode) => updateSetting('mode', mode)}
-            />
+            <ImportModeControl value={settings.mode} onChange={(mode) => updateSetting('mode', mode)} />
           </section>
 
           <section className={styles.section}>

@@ -11,7 +11,7 @@ import {
 } from 'react';
 import { useStyles } from './style';
 import UploadLocalFile, { type FileUrl } from '@/components/UploadLocalFile';
-import { Alert, Checkbox, Form, Input, Select, InputNumber, Switch, Table, Tooltip } from 'antd';
+import { Alert, Button, Checkbox, Form, Input, Select, InputNumber, Switch, Table, Tooltip } from 'antd';
 import i18n from '@/i18n';
 import { useImportExportStore } from '@/store/importExport';
 import { IconButton } from '@chat2db/ui';
@@ -27,6 +27,10 @@ import { stageSelectedImportFile } from '../ImportMappingContent/fileStaging';
 import { createStagedFileOwnership } from '../ImportMappingContent/stagedFileOwnership';
 import { getImportPreviewErrorMessage } from '../ImportMappingContent/mapping';
 import { getImportMappingIssues, mergeImportColumnMappings } from './mappingValidation';
+import ImportAdmissionDetails from '../ImportAdmissionDetails';
+import { useImportUploadCapabilities } from '@/hooks/useImportUploadCapabilities';
+import { checkImportUploadSelection } from '@/utils/importUploadLimits';
+import ImportUploadLimitsNotice from '../ImportUploadLimitsNotice';
 
 interface IProps {
   className?: string;
@@ -64,6 +68,7 @@ const checkpointableFormats = [
 const ImportExportFile = forwardRef((props: IProps, ref: ForwardedRef<ImportExportFileRef>) => {
   const { setIsReady } = props;
   const { styles } = useStyles();
+  const uploadCapabilities = useImportUploadCapabilities('single');
   const [form] = Form.useForm();
   const { importExportDataBoundInfo } = useImportExportStore((state) => {
     return {
@@ -76,6 +81,7 @@ const ImportExportFile = forwardRef((props: IProps, ref: ForwardedRef<ImportExpo
   const [selectedFile, setSelectedFile] = useState<FileUrl>();
   const [stagedFile, setStagedFile] = useState<{ selection: FileUrl; id: string }>();
   const [previewLoading, setPreviewLoading] = useState(false);
+  const [previewAttempt, setPreviewAttempt] = useState(0);
   const [importError, setImportError] = useState<string>();
   const [exportLocation, setExportLocation] = useState<string>('');
   const [importPreview, setImportPreview] = useState<IImportPreview | null>(null);
@@ -243,6 +249,7 @@ const ImportExportFile = forwardRef((props: IProps, ref: ForwardedRef<ImportExpo
     mode,
     confirmedNoStrongRelations,
     importExportDataBoundInfo,
+    previewAttempt,
   ]);
 
   const targetColumnOptions = useMemo(() => {
@@ -267,6 +274,7 @@ const ImportExportFile = forwardRef((props: IProps, ref: ForwardedRef<ImportExpo
     (unsupportedParallelFormat || !confirmedNoStrongRelations || admission?.verdict === 'PARALLEL_FORBIDDEN');
   const importReady =
     !!fileId &&
+    !!selectedFile && checkImportUploadSelection([selectedFile], uploadCapabilities.limits).valid &&
     !importError &&
     !previewLoading &&
     !parallelForbidden &&
@@ -335,12 +343,12 @@ const ImportExportFile = forwardRef((props: IProps, ref: ForwardedRef<ImportExpo
   }));
 
   const handleFormChange = (changedValues, allValues) => {
-    if (changedValues.exportType) {
+    if (isImport && changedValues.exportType) {
       setSelectedFile(undefined);
       setColumnMappings({});
       setIsReady?.(false);
     }
-    if (['charset', 'delimiter', 'quoteChar', 'skipRows', 'nullString', 'onError', 'maxErrors'].some((key) => key in changedValues)) {
+    if (isImport && ['charset', 'delimiter', 'quoteChar', 'skipRows', 'nullString', 'onError', 'maxErrors'].some((key) => key in changedValues)) {
       setImportPreview(null);
       setIsReady?.(false);
     }
@@ -421,7 +429,14 @@ const ImportExportFile = forwardRef((props: IProps, ref: ForwardedRef<ImportExpo
       )}
       {isImport && (
         <Form.Item className={styles.fullWidth} label={`${i18n('workspace.importExport.sourceFile')}:`}>
-          <UploadLocalFile fileUrlListChange={handleFileUrlListChange} accept={uploadLocalFileAccept} fileSize={50} />
+          <UploadLocalFile fileUrlListChange={handleFileUrlListChange} accept={uploadLocalFileAccept}
+            fileSize={uploadCapabilities.limits.fileSize} maxFiles={uploadCapabilities.limits.maxFiles}
+            maxTotalSizeBytes={uploadCapabilities.limits.maxTotalSizeBytes}
+            disabled={uploadCapabilities.limits.disabled}
+          />
+          <ImportUploadLimitsNotice capabilities={uploadCapabilities} invalid={!!selectedFile &&
+            !checkImportUploadSelection([selectedFile], uploadCapabilities.limits).valid}
+          />
         </Form.Item>
       )}
       {isImport && formValue.exportType === ImportExportFileType.SQL && (
@@ -460,10 +475,10 @@ const ImportExportFile = forwardRef((props: IProps, ref: ForwardedRef<ImportExpo
           <Form.Item label={`${i18n('workspace.importExport.onError')}:`} name="onError">
             <Select
               allowClear
-              placeholder="ABORT"
+              placeholder={i18n('workspace.importExport.multiTable.onErrorAbort')}
               options={[
-                { label: 'ABORT', value: 'ABORT' },
-                { label: 'SKIP', value: 'SKIP' },
+                { label: i18n('workspace.importExport.multiTable.onErrorAbort'), value: 'ABORT' },
+                { label: i18n('workspace.importExport.multiTable.onErrorSkip'), value: 'SKIP' },
               ]}
             />
           </Form.Item>
@@ -474,7 +489,18 @@ const ImportExportFile = forwardRef((props: IProps, ref: ForwardedRef<ImportExpo
           )}
         </>
       )}
-      {isImport && importError && <Alert type="error" showIcon message={importError} />}
+      {isImport && importError && (
+        <Alert type="error" showIcon message={importError} action={
+          fileId && previewableFormat ? (
+            <Button size="small" disabled={previewLoading} onClick={() => {
+              setPreviewLoading(true);
+              setPreviewAttempt((attempt) => attempt + 1);
+            }}
+            >{i18n('common.button.retry')}</Button>
+          ) : undefined
+        }
+        />
+      )}
       {isImport && importPreview && (
         <div className={styles.previewPanel}>
           <div className={styles.previewTitle}>{i18n('workspace.importExport.preview.columnMapping')}</div>
@@ -591,13 +617,7 @@ const ImportExportFile = forwardRef((props: IProps, ref: ForwardedRef<ImportExpo
                 : i18n('workspace.importExport.parallelAdmissionPending')
             }
             description={
-              admission?.findings.length
-                ? `${i18n('workspace.importExport.parallelAdmissionRules')}: ${admission.findings
-                    .map((finding) => `[${finding.code}]`)
-                    .join(', ')}. ${i18n('workspace.importExport.parallelAdmissionEffectiveMode')}: ${
-                    admission.effectiveMode
-                  }`
-                : undefined
+              admission ? <ImportAdmissionDetails report={admission} translate={i18n} /> : undefined
             }
           />
           <Checkbox

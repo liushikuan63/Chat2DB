@@ -1,3 +1,4 @@
+import { sourcePreviewKey } from './sourcePreview';
 import assert from 'node:assert/strict';
 import { DatabaseTypeCode } from '@/constants/common';
 import { ImportExportFileType, ImportExportTaskType, ImportExportType } from '@/constants/importExport';
@@ -56,7 +57,21 @@ const sources = [
     fileId: 'file-orders',
     status: 'READY' as const,
   },
-];
+].map((source) => ({
+  ...source,
+  previewKey: sourcePreviewKey(source),
+  previewStatus: 'READY' as const,
+  columnMappings: { id: 'id' },
+  preview: {
+    fileColumns: ['id'],
+    sampleRows: [],
+    columnMatches: [],
+    missingTableColumns: [],
+    targetColumns: [
+      { name: 'id', dataType: 'INT', nullable: false, autoIncrement: false, defaultValue: null, comment: null },
+    ],
+  },
+}));
 const dependencies: LogicalDependencyDraft[] = [
   {
     id: 'orders-user',
