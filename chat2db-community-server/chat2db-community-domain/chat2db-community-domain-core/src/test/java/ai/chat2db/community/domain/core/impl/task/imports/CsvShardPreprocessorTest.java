@@ -19,6 +19,48 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class CsvShardPreprocessorTest {
 
+    @Test
+    void typedReaderPreservesNullEmptyAndEmbeddedNewlinesAcrossCanonicalShards() throws Exception {
+        Path source = Files.writeString(tempDirectory.resolve("nullable.csv"),
+                "ID;TEXT\n1;\n2;\"\"\n3;\"two\nlines\"\n");
+        var options = ai.chat2db.community.domain.api.model.task.CsvOptions.defaults();
+        options.setDelimiter(";");
+        List<ImportManifestShard> shards = CsvShardPreprocessor.preprocess(source.toFile(), options, 0,
+                tempDirectory.resolve("typed"), null, null, "T", "T", 0, 1, () -> { });
+        assertEquals(3, shards.size());
+        List<String> values = new ArrayList<>();
+        for (ImportManifestShard shard : shards) {
+            CsvShardPreprocessor.verify(Path.of(shard.getSourcePath()).toFile(), shard);
+            ai.chat2db.community.domain.core.impl.task.imports.reader.CsvImportReader.read(
+                    Path.of(shard.getSourcePath()).toFile(), CsvShardPreprocessor.canonicalOptions(options),
+                    Integer.MAX_VALUE, 0, ignored -> { }, (row, number) -> values.add(row.get(1)), () -> { });
+            try (CSVParser parser = CSVParser.parse(Path.of(shard.getSourcePath()), StandardCharsets.UTF_8,
+                    CsvShardPreprocessor.canonicalReadFormat())) {
+                var records = parser.getRecords();
+                assertEquals(values.get(values.size() - 1), records.get(1).get(1));
+            }
+        }
+        assertEquals(java.util.Arrays.asList(null, "", "two\nlines"), values);
+    }
+
+    @Test
+    void cancellationDeletesOnlyThisAttemptIncludingAlreadyPublishedParts() throws Exception {
+        Path source = Files.writeString(tempDirectory.resolve("cancel.csv"), "ID\n1\n2\n3\n4\n");
+        Path output = Files.createDirectories(tempDirectory.resolve("cancel-parts"));
+        Path unrelated = Files.writeString(output.resolve("keep.txt"), "owned elsewhere");
+        assertThrows(java.util.concurrent.CancellationException.class, () -> CsvShardPreprocessor.preprocess(
+                source.toFile(), ai.chat2db.community.domain.api.model.task.CsvOptions.defaults(), 0,
+                output, null, null, "T", "T", 0, 1, () -> {
+                    try (var paths = Files.list(output)) {
+                        if (paths.anyMatch(path -> path.toString().endsWith(".csv"))) {
+                            throw new java.util.concurrent.CancellationException("test cancellation during slicing");
+                        }
+                    } catch (java.io.IOException failure) { throw new java.io.UncheckedIOException(failure); }
+                }));
+        try (var paths = Files.list(output)) { assertEquals(List.of(unrelated), paths.toList()); }
+        assertEquals("owned elsewhere", Files.readString(unrelated));
+    }
+
     @TempDir
     Path tempDirectory;
 

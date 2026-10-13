@@ -16,6 +16,10 @@ import ai.chat2db.community.web.api.model.request.db.ImportSheetsRequest;
 import ai.chat2db.community.web.api.model.response.task.TaskSubmitResponse;
 import jakarta.validation.Valid;
 import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.beans.factory.annotation.Autowired;
+import ai.chat2db.community.web.api.adapter.db.ImportUploadCapabilityAdapter;
+import ai.chat2db.community.web.api.model.response.db.ImportUploadCapabilities;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
@@ -42,6 +46,14 @@ public class DbImportPreviewController {
     private final DbImportWebConverter importWebConverter;
 
     private final ImportFileUploadAdapter importFileUploadAdapter;
+
+    @Autowired
+    private ImportUploadCapabilityAdapter uploadCapabilityAdapter;
+
+    @GetMapping("/capabilities")
+    public DataResult<ImportUploadCapabilities> capabilities() {
+        return DataResult.of(uploadCapabilityAdapter.capabilities());
+    }
 
     public DbImportPreviewController(IDbImportPreviewService importPreviewService,
             IDbMappedImportService mappedImportService,

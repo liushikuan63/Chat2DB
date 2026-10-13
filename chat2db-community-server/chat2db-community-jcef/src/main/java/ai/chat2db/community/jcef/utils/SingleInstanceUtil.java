@@ -111,6 +111,7 @@ public final class SingleInstanceUtil {
             try {
                 boolean checkedLegacy = false;
                 boolean waitingForExit = false;
+                boolean modernPeerSeen = false;
                 while (true) {
                     remainingMillis(deadline);
                     FileLock lock;
@@ -128,6 +129,14 @@ public final class SingleInstanceUtil {
                     }
                     Endpoint endpoint = readEndpoint(directory);
                     if (endpoint == null) {
+                        if (modernPeerSeen) {
+                            // A modern peer owned the lock and its endpoint has just disappeared: it
+                            // is still releasing the lock. Falling back to the legacy mailbox here
+                            // would report this launch as secondary although the peer is already
+                            // gone, so wait for the lock instead.
+                            pause(deadline);
+                            continue;
+                        }
                         if (!checkedLegacy) {
                             checkedLegacy = true;
                             continue;
@@ -135,6 +144,7 @@ public final class SingleInstanceUtil {
                         publish(directory.resolve("app.ipc"), argument.getBytes(StandardCharsets.UTF_8));
                         return false;
                     }
+                    modernPeerSeen = true;
                     if (forward(endpoint, argument, deadline)) {
                         return false;
                     }
@@ -379,7 +389,8 @@ public final class SingleInstanceUtil {
     private static IpcVersion ipcVersion(Path ipc) throws IOException {
         try {
             BasicFileAttributes attributes = Files.readAttributes(ipc, BasicFileAttributes.class);
-            return new IpcVersion(attributes.fileKey(), attributes.lastModifiedTime());
+            return new IpcVersion(attributes.fileKey(), attributes.creationTime(),
+                    attributes.lastModifiedTime());
         } catch (NoSuchFileException ignored) {
             return null;
         }
@@ -452,6 +463,15 @@ public final class SingleInstanceUtil {
     private record LaunchRequest(String argument, boolean forwarded) {
     }
 
-    private record IpcVersion(Object fileKey, FileTime modifiedTime) {
+    /**
+     * Identity of the published request file.
+     *
+     * <p>{@code fileKey} is the natural discriminator, but the JDK returns {@code null} for it on
+     * Windows, and a publisher that writes the same argument twice also produces the same content
+     * and — with a preserved timestamp — the same modification time. The creation time closes that
+     * gap: a replacement is a new file moved onto the path, so its creation time differs, while a
+     * duplicate watch event for the same publication keeps every field identical.
+     */
+    private record IpcVersion(Object fileKey, FileTime creationTime, FileTime modifiedTime) {
     }
 }
