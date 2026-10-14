@@ -40,6 +40,7 @@ import java.util.stream.Collectors;
 import java.util.stream.LongStream;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -51,6 +52,36 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * {@link #storage()} more than once in one test therefore means "restart the application".
  */
 public abstract class AbstractTaskStorageContractTest {
+
+    @Test
+    void waitingTaskCanBeDurablyCancelled() {
+        TaskStorage storage = storage();
+        Task created = storage.create(task("waiting-cancel"), event("TASK_CREATED"));
+        assertTrue(storage.compareAndSetStatus(created.getId(), "PENDING", "CANCELLED",
+                TaskStatusPatch.builder().stage("CANCELLED").progressMessage("Cancelled before execution")
+                        .finishedAt(new Date()).build(), event("TASK_CANCELLED")));
+        assertEquals("CANCELLED", storage.get(created.getId()).orElseThrow().getStatus());
+        assertTrue(storage.listNonTerminalTasks().stream().noneMatch(item -> item.getId().equals(created.getId())));
+    }
+
+    @Test
+    void pendingReceiptRecoveryRetainsItsOutcomeAndClearsItWhenResumed() {
+        TaskStorage storage = storage();
+        Task input = task("receipt-recovery"); input.setType("DATA_FILE_IMPORT");
+        Task created = storage.create(input, event("TASK_CREATED"));
+        assertTrue(storage.compareAndSetStatus(created.getId(), "PENDING", "RUNNING",
+                TaskStatusPatch.builder().stage("STARTING").build(), event("TASK_STARTED")));
+        assertTrue(storage.compareAndSetStatus(created.getId(), "RUNNING", "PENDING",
+                TaskStatusPatch.builder().stage("RESUMING").errorCode("IMPORT_COMMIT_OUTCOME_UNKNOWN")
+                        .errorMessage("Commit reply lost; receipt recovery required").build(), event("RESUME_AVAILABLE")));
+        Task pending = storage.get(created.getId()).orElseThrow();
+        assertEquals("IMPORT_COMMIT_OUTCOME_UNKNOWN", pending.getErrorCode());
+        assertEquals("Commit reply lost; receipt recovery required", pending.getErrorMessage());
+        assertTrue(storage.compareAndSetStatus(created.getId(), "PENDING", "RUNNING",
+                TaskStatusPatch.builder().stage("STARTING").build(), event("TASK_RESUMED")));
+        assertNull(storage.get(created.getId()).orElseThrow().getErrorCode());
+        assertNull(storage.get(created.getId()).orElseThrow().getErrorMessage());
+    }
 
     @TempDir
     protected File baseDir;

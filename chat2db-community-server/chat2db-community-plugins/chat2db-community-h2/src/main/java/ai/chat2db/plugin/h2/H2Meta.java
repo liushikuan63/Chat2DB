@@ -32,6 +32,11 @@ import static ai.chat2db.plugin.h2.constant.H2MetaConstants.*;
 public class H2Meta extends DefaultMetaService implements IDbMetaData {
 
     @Override
+    public Optional<ai.chat2db.spi.IImportReceiptDialect> importReceiptDialect() {
+        return Optional.of(new H2ImportReceiptDialect());
+    }
+
+    @Override
     public ISQLIdentifierProcessor getSQLIdentifierProcessor() {
         return H2IdentifierProcessor.INSTANCE;
     }

@@ -199,6 +199,9 @@ public final class ImportRowBatcher implements AutoCloseable {
     private final long resumeBelowRow;
 
     private final TaskResumeJournal journal;
+    private final ImportReceiptStore receiptStore;
+    private final boolean checkpointEnabled;
+    private int completedReceiptStatements;
 
     /**
      * True when the enclosing transaction commits only after this batcher closes, so a batch that
@@ -247,8 +250,10 @@ public final class ImportRowBatcher implements AutoCloseable {
         this.requestContext = ContextUtils.queryContext();
         this.statementGuard = Chat2DBContext.captureStatementGuard();
         this.loggingContext = MDC.getCopyOfContextMap();
-        this.resumeBelowRow = resolveResumeBelowRow(spec, context);
         this.defersRowDurabilityToCommit = context.defersRowDurabilityToCommit();
+        this.receiptStore = ImportRecoveryIdentity.open(spec, resolution, context);
+        this.checkpointEnabled = spec.getRecoveryProtocol() == null || receiptStore != null;
+        this.resumeBelowRow = receiptStore != null || !checkpointEnabled ? 0L : resolveResumeBelowRow(spec, context);
         // Ordinary abort-on-error imports retain their historical committed prefix. Shards and
         // SKIP replay need a transactional batch so rolled-back rows can be retried together.
         this.sqlExecutor = new ImportSqlExecutor(context,
@@ -257,7 +262,14 @@ public final class ImportRowBatcher implements AutoCloseable {
             log.info("Import resume: the first {} rows are durable from the interrupted run; "
                     + "they will be skipped", resumeBelowRow);
         }
-        this.journal = TaskResumeJournal.open(context.taskId(), sourceIdentity);
+        this.journal = checkpointEnabled ? TaskResumeJournal.open(context.taskId(), sourceIdentity) : null;
+        if (receiptStore != null) {
+            // Even a crash before the first 500-row batch now has an authoritative DB protocol.
+            context.checkpoint(ResumeState.builder().shardNo(0).kind(RESUME_KIND_IMPORT)
+                    .cursorJson(resumeCursorJson(0)).rowsDone(0L).updatedAt(new Date()).build());
+        } else if (!checkpointEnabled) {
+            context.logWarn("IMPORT_RECOVERY_UNSUPPORTED", "This target cannot safely resume an interrupted row import", Map.of());
+        }
         if (journal != null && resumeBelowRow > 0) {
             journal.progress("RESUMED", resumeBelowRow);
         }
@@ -452,7 +464,16 @@ public final class ImportRowBatcher implements AutoCloseable {
         RuntimeException failureToReport = null;
         try {
             try {
-                executeReplaySafe(batch.sqls());
+                completedReceiptStatements = 0;
+                if (receiptStore == null) executeReplaySafe(batch.sqls());
+                else {
+                    for (int index = 0; index < batch.sqls().size(); index++) {
+                        receiptStore.execute(batch.rowNumbers().get(index), batch.sqls().get(index));
+                        completedReceiptStatements++;
+                    }
+                    context.logInfo("BATCH_EXECUTED", "Receipt-backed import batch executed",
+                            Map.of("statementCount", rows));
+                }
                 importedCount.add(rows);
                 fullyHandled = true;
             } catch (TaskCancelledException cancellation) {
@@ -462,7 +483,8 @@ public final class ImportRowBatcher implements AutoCloseable {
                 context.logError("IMPORT_BATCH_FAILED", "Could not import batch", Map.of(
                         "statementCount", rows,
                         "message", StringUtils.defaultString(batchFailure.getMessage())));
-                if (!isSkipMode() || batchFailure instanceof ReplayTransactionException) {
+                if (!isSkipMode() || batchFailure instanceof ReplayTransactionException
+                        || batchFailure instanceof ImportReceiptStore.ReceiptSafetyException) {
                     recordSequentialPrefix(batch, batchFailure);
                     throw batchFailure;
                 }
@@ -502,7 +524,8 @@ public final class ImportRowBatcher implements AutoCloseable {
 
     /** Retains the committed prefix without letting a later resume replay those rows. */
     private void recordSequentialPrefix(PendingBatch batch, RuntimeException failure) {
-        int completed = Math.min(batch.sqls().size(), sqlExecutor.completedSequentialStatements());
+        int completed = Math.min(batch.sqls().size(), receiptStore == null
+                ? sqlExecutor.completedSequentialStatements() : completedReceiptStatements);
         if (completed == 0 || defersRowDurabilityToCommit) {
             return;
         }
@@ -512,6 +535,7 @@ public final class ImportRowBatcher implements AutoCloseable {
         if (journal != null) {
             journal.progress("IMPORTING", rowsDone);
         }
+        if (!checkpointEnabled) return;
         try {
             // A failure is not a cadence boundary: force this watermark even for a short prefix.
             context.checkpoint(ResumeState.builder().shardNo(0).kind(RESUME_KIND_IMPORT)
@@ -527,7 +551,8 @@ public final class ImportRowBatcher implements AutoCloseable {
     private void replayIndividually(PendingBatch batch) {
         for (int index = 0; index < batch.sqls().size(); index++) {
             try {
-                executeReplaySafe(List.of(batch.sqls().get(index)));
+                if (receiptStore == null) executeReplaySafe(List.of(batch.sqls().get(index)));
+                else receiptStore.execute(batch.rowNumbers().get(index), batch.sqls().get(index));
                 importedCount.increment();
             } catch (TaskCancelledException cancellation) {
                 // A cancelled task is not a bad row. Recording it as rejected would write the row
@@ -535,8 +560,12 @@ public final class ImportRowBatcher implements AutoCloseable {
                 // here instead of being handled by the row error policy.
                 throw cancellation;
             } catch (RuntimeException rowFailure) {
-                if (rowFailure instanceof ReplayTransactionException || isConnectionFailure(rowFailure)) {
+                if (rowFailure instanceof ReplayTransactionException || isConnectionFailure(rowFailure)
+                        || rowFailure instanceof ImportReceiptStore.ReceiptSafetyException) {
                     throw rowFailure;
+                }
+                if (receiptStore != null && !(rowFailure instanceof ImportReceiptStore.RejectedReceiptException)) {
+                    receiptStore.recordRejected(batch.rowNumbers().get(index), batch.sqls().get(index), rootMessage(rowFailure));
                 }
                 handleRejectedRow(batch.rowNumbers().get(index), batch.rows().get(index),
                         rootMessage(rowFailure));
@@ -717,6 +746,7 @@ public final class ImportRowBatcher implements AutoCloseable {
 
     /** Layered cadence: journal every 8, storage checkpoint every 64, snapshot every 256 batches. */
     private void maybeCheckpoint() {
+        if (!checkpointEnabled) return;
         batchesSinceCheckpoint++;
         long rowsDone = durableWatermark() - 1;
         try {
@@ -754,6 +784,10 @@ public final class ImportRowBatcher implements AutoCloseable {
         JSONObject cursor = new JSONObject();
         cursor.put("watermark", rowsDone + 1);
         cursor.putAll(sourceIdentity);
+        if (receiptStore != null) {
+            cursor.put("recoveryProtocol", ImportRecoveryIdentity.DATABASE);
+            cursor.put("recoveryIdentity", spec.getRecoveryIdentity());
+        }
         return cursor.toJSONString();
     }
 
@@ -1005,6 +1039,9 @@ public final class ImportRowBatcher implements AutoCloseable {
     // --- rejected-row bookkeeping ---------------------------------------------------------
 
     private void handleFailedRow(long fileRowNumber, List<String> fileValues, RuntimeException failure) {
+        if (receiptStore != null && isSkipMode()) {
+            receiptStore.recordRejected(fileRowNumber, "RAW:" + JSON.toJSONString(fileValues), rootMessage(failure));
+        }
         handleRejectedRow(fileRowNumber, JSON.toJSONString(fileValues), rootMessage(failure));
     }
 
@@ -1180,7 +1217,7 @@ public final class ImportRowBatcher implements AutoCloseable {
             LAST_TUNING.set(new ImportTuningSnapshot(workerCount, submittedBatches, importedRows,
                     totalImportNanos, batchSizer.batchSize(),
                     gate == null ? 1 : gate.availablePermits(), peakInFlightBatches.get()));
-            if (failure.get() == null && !defersRowDurabilityToCommit) {
+            if (checkpointEnabled && failure.get() == null && !defersRowDurabilityToCommit) {
                 // Tail checkpoint: after the final flush everything accepted is durable. A deferred
                 // import has not committed yet, so it must not claim any rows either.
                 try {

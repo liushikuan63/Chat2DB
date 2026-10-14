@@ -50,6 +50,7 @@ import static ai.chat2db.spi.util.SortUtils.sortDatabase;
 import static ai.chat2db.plugin.mysql.constant.MysqlMetaDataConstants.*;
 @Slf4j
 public class MysqlMetaData extends DefaultMetaService implements IDbMetaData {
+
     @Override
     public Optional<Boolean> hasOpenTransaction(Connection connection,
             ai.chat2db.community.domain.api.service.db.ISqlExecutionStatementListener listener) throws SQLException {
@@ -69,7 +70,10 @@ public class MysqlMetaData extends DefaultMetaService implements IDbMetaData {
         }
     }
 
-
+    @Override
+    public Optional<ai.chat2db.spi.IImportReceiptDialect> importReceiptDialect() {
+        return Optional.of(new MysqlImportReceiptDialect());
+    }
 
     public static final ISQLIdentifierProcessor MYSQL_IDENTIFIER_PROCESSOR = MysqlIdentifierProcessor.INSTANCE;
 

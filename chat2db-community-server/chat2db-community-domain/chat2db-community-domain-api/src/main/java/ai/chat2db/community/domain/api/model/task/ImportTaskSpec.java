@@ -19,6 +19,12 @@ public class ImportTaskSpec implements TaskSpec {
     /** Server-generated fingerprint that binds the client submission key to this exact request. */
     private String clientSubmissionFingerprint;
 
+    /** Server-assigned identity retained across restart; never accepted from the transport DTO. */
+    private String recoveryIdentity;
+
+    /** DATABASE_RECEIPTS_V1 or NO_DATABASE_RECEIPTS for new standard single-table row tasks. */
+    private String recoveryProtocol;
+
     private String taskType;
 
     private String taskName;

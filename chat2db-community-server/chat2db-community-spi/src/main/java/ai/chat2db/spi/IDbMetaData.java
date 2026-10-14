@@ -38,6 +38,11 @@ import java.util.Optional;
  */
 public interface IDbMetaData {
 
+    /** Unsupported plugins keep ordinary imports but do not advertise receipt-backed replay. */
+    default Optional<IImportReceiptDialect> importReceiptDialect() {
+        return Optional.empty();
+    }
+
     /** Authoritative server transaction state when available; empty keeps the generic script guard.
      * Implementations must not commit or change connection modes, and must expose any probe statement. */
     default Optional<Boolean> hasOpenTransaction(Connection connection,

@@ -142,12 +142,51 @@ SQL Server 插件提供同一连接的 `SELECT @@TRANCOUNT` 只读探针，覆�
 
 隔离 MySQL 的显式 BEGIN 脚本取消复现了任务已 CANCELLED、连接47仍在 innodb_trx 的泄漏。普通脚本初始 JDBC autoCommit=true 时，失败／取消／Error 会先从当前 ConnectInfo 脱离该借用连接再关闭，避免脏事务回池；初始 autoCommit=false 的 caller 保留自身事务决定，exporter profile 继续其既有清理路径。四个真实 H2 回归验证取消、执行失败、caller 事务与已提交前缀。整合 owning package2264/0/0/0，修复后的真实 MySQL 取消任务1791934067591999 终态为 CANCELLED，未提交行0，原连接与事务均消失。close 失败物理会话消失、成功脚本遗漏 COMMIT 和其他真实引擎尚不据此宣称覆盖。
 
-真实后端强杀／重启验证：STANDARD+SKIP 的任务1791933145770999 在已提交500行后中断，重启恢复为 PENDING/RESUMING，同一任务最终1500行且字段一致；各阶段重复提交均返回原ID，重复 resume 被拒绝。但默认 STANDARD/ABORT 在已提交622行、本地 checkpoint500时中断，恢复重放导致1062主键错误。仅本地 checkpoint 不能消除跨持久化提交窗口，不能将前一个成功推广为默认模式可靠恢复。用户已授权目标数据库工具管理回执表，回执与目标行同事务的修复及无唯一键验证正在进行，尚未完成验收。
+真实后端强杀／重启验证：STANDARD+SKIP 的任务1791933145770999 在已提交500行后中断，重启恢复为 PENDING/RESUMING，同一任务最终1500行且字段一致；各阶段重复提交均返回原ID，重复 resume 被拒绝。但默认 STANDARD/ABORT 在已提交622行、本地 checkpoint500时中断，恢复重放导致1062主键错误。仅本地 checkpoint 不能消除跨持久化提交窗口，不能将前一个成功推广为默认模式可靠恢复。用户已授权目标数据库工具管理回执表；该历史首红保留。其修复后的真实重启和无唯一键验收见下方数据库回执章节。
 
-当前整合源码的浏览器上传→预览→KEY映射ID→导入结果和真实CSV下载已重新跑通：任务1791933196875999、导出1791933199157999，中文、emoji、字段内换行、小数逐字段一致。取消／响应丢失浏览器路径仍待后续阶段验证。
+当前整合源码的浏览器上传→预览→KEY映射ID→导入结果和真实CSV下载已重新跑通：任务1791933196875999、导出1791933199157999，中文、emoji、字段内换行、小数逐字段一致。后续在 H2 与 File 两种任务存储模式下完成了真实响应丢失重试和取消／结果验证，见下方最新验收。
 
 ### Unfinished task scripts and procedural blocks (2026-10-14)
 
 A task that borrowed an auto-commit connection must finish its script transaction and restore auto-commit before reporting success. An unfinished BEGIN or SET autocommit=0 script fails with IMPORT_SQL_TRANSACTION_OPEN and discards its borrowed connection; an initially caller-owned transaction retains its caller's decision. MySQL checks the actual session autocommit flag before insert batches, preserving SQL-controlled rollback even when JDBC caches a different flag. COMMIT alone does not restore a disabled MySQL session mode. The read-only probe has a five-second timeout and participates in task cancellation.
 
 BEGIN/END procedural blocks are distinct from transaction control: Oracle anonymous PL/SQL blocks and SQL Server TRY blocks do not alter the generic transaction tracker. The production Oracle parser has a focused contract regression; it is not a real Oracle engine run. Six real-H2 script cases, ten transaction/parser cases and three MySQL probe contracts pass without skips. Fresh isolated MySQL BEGIN and SET-autocommit EOF cases fail, leave zero target rows and no active fixture transaction; the Chinese task error is verified. Earlier committed chunks remain committed.
+
+## 数据库回执恢复与完整流程验收（2026-10-14）
+
+普通单表 STANDARD 的 CSV、XLS、XLSX、JSON 导入支持数据库回执恢复。服务器生成恢复 UUID，并将完整源文件 SHA256、目标命名空间、格式／映射／转换选项绑定到源回执；该 UUID 不进入客户端提交指纹。任务重启使用持久化的原身份和任务 ID，重新读取源文件，以数据库回执判断每一行是否需要写入。一个批次尚未更新本地进度时，已提交行也不会被重写；目标无需唯一键。
+
+工具在目标命名空间创建 `__chat2db_import_receipts_v1`。每行先在同一数据库事务中占用唯一 `(run_key,row_no)` 回执，再写目标数据，最后提交。已导入和已拒绝两种 outcome 均持久化；源／行内容改变会拒绝复用。提交回复丢失时丢弃该连接，将任务保留为 PENDING/RESUMING，保留错误码、源文件及 checkpoint，允许以新连接读取回执再恢复。用户退出也保留这个未知结果；确认前不能将其标记为安全取消。
+
+回执使用独立任务连接，建表不会提交用户 SQL 控制台已有事务。目标需允许创建／读写回执表；已有同名表必须通过列、类型、可空性、默认版本标记和联合主键校验，否则在目标写入前失败。MySQL 系列仅准入 InnoDB；每行持有目标及回执的元数据锁并重查引擎。H2 仅准入原生 CACHED/MEMORY 表。PostgreSQL 仅准入永久 logged 普通 heap，每行持有关系锁并检查目标和回执的持久性；UNLOGGED、临时、foreign、view 和分区父表不宣称该恢复能力。
+
+不支持回执的目标仍保留普通导入，日志明确提示无法安全重启恢复，新任务不发布可重放检查点。旧标准单表任务的本地检查点没有数据库提交证明，启动后以 IMPORT_LEGACY_RECOVERY_UNSAFE 明确失败，不能直接重放已提交行。ULTRA_FAST、多表／manifest、staging、rehearsal／延迟事务路径继续原协议，本次没有扩展或宣称它们具备此回执保证。应用回退或数据库管理员主动删表／改数据／迁移数据库，需要另行处理这些持久化状态。
+
+回执默认永久保留，保护活动、未知提交、可恢复任务和提交重试。应用不会自动 DROP 回执表、清除回执或删除目标数据；回执空间随处理行数增长。它与应用提交键保留期是不同状态：显式启用提交键过期后再次提交会建立新的任务／恢复 UUID。数据库清理应依据已确认的终态和提交键保留要求另行安排，不在导入期间删除恢复资料。暂存源仍沿用已验证的文件归属及终态清理策略。
+
+File 任务存储取消时，中断标志可能使 FileChannel 无法落盘终态。TaskRunner 在完成锁内清除中断，持久化结果并清理资源后恢复标志。回归分别控制“先中断后进入 catch”和“先取消 token、后中断”时序，真实 File 存储重开后均为 CANCELLED，资源只清理一次。提交阶段和未知结果恢复阶段的保护保持。
+
+### 实际验证
+
+| 路径 | 已运行结果 |
+| --- | --- |
+| 完整 owning core/web 与依赖 package | 2368 测试，0 失败／错误／跳过；显式覆盖 Surefire include 和 failure-ignore 默认值 |
+| 真实 H2 回执与四格式 | Store9；CSV/JSON/XLS/XLSX4；CSV/XLSX SKIP2，包含转换拒绝和 SQL 约束拒绝，丢回复后重放保持相同拒绝行及原因 |
+| 真实 PostgreSQL16 回执 | 4 项无跳过：无键重放、未知 commit、REJECTED、UNLOGGED／分区及非持久回执拒绝；自有容器已清理 |
+| 默认 STANDARD、H2 任务存储、MySQL 无唯一键 | task1791940585713999，本地500／数据库706后强杀；原 ID 恢复到1500行，ID／备注／金额正确，各阶段提交重试同 ID，冲突键拒绝 |
+| 默认检查点频率、File 任务存储、MySQL 无唯一键 | task1791942298951999，本地0／数据库669后强杀，原 ID 恢复到精确1500行；终态清理源文件 |
+| 浏览器预览→映射→成功／下载 | 必填 KEY→ID 映射约束、真实任务、中文／emoji／字段内换行／小数及 CSV 下载逐值校验通过 |
+| 浏览器真实响应丢失与取消 | 先真实提交再丢弃响应，同一表单重试同 ID，无键表仅3行；H2 模式取消31行，最终 File 模式取消28行，终态 UI、无继续写入和源清理通过 |
+
+浏览器回归保留截图、trace、请求和数据库结果；初次定位／等待失败和 File 终态首红均保留。页面异常为0，既有 React findDOMNode 弃用警告及故意注入的 ERR_FAILED 分别记录。没有把 fixture、静态 parser／driver 合同或单纯 package 当作真实 Oracle、SQL Server、MariaDB、ULTRA 或原生安装包验收。
+
+可复跑的专用入口：
+
+```powershell
+python -X utf8 script/test/run-import-receipt-postgres-it.py
+# 先用已有 prepare-import-browser-fixture.py 创建明确的 loopback 测试数据源，
+# C2D_BROWSER_FIXTURE 指向该 fixture；C2D_BROWSER_OUTPUT 必须为新证据目录。
+# C2D_PLAYWRIGHT_MODULE 可复用已安装的项目 Playwright，不全局安装或抢前台。
+node script/test/import-task-browser-e2e.cjs
+node script/test/import-task-lifecycle-browser-e2e.cjs
+```
