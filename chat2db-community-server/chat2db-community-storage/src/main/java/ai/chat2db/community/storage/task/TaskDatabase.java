@@ -117,7 +117,8 @@ final class TaskDatabase implements AutoCloseable {
         String databaseFile = new File(directory, "task").getAbsolutePath().replace(File.separatorChar, '/');
         // DB_CLOSE_DELAY keeps the store open between operations, so a connection per operation does
         // not pay for re-opening the MVStore; LOCK_TIMEOUT covers serialized event-sequence allocation.
-        this.jdbcUrl = "jdbc:h2:" + databaseFile + ";DB_CLOSE_DELAY=-1;LOCK_TIMEOUT=10000";
+        // A returned checkpoint must survive process exit without depending on delayed log flush.
+        this.jdbcUrl = "jdbc:h2:" + databaseFile + ";DB_CLOSE_DELAY=-1;LOCK_TIMEOUT=10000;WRITE_DELAY=0";
     }
 
     static String defaultStorageBasePath() {

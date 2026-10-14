@@ -19,6 +19,7 @@ concurrency:
 jobs:
   sync:
     name: Reconcile Project status
+    if: github.repository == 'OtterMind/Chat2DB' || vars.ENABLE_COMMUNITY_PROJECT_SYNC == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:

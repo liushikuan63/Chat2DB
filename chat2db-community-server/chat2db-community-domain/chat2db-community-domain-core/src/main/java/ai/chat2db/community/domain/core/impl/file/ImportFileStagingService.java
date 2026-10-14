@@ -116,7 +116,7 @@ public class ImportFileStagingService implements IImportFileStagingService {
         cleanupExpiredFiles();
         try {
             Path file = stagedFile(fileId);
-            if (!Files.isRegularFile(file) || !Files.isReadable(file)) {
+            if (!Files.isRegularFile(file, LinkOption.NOFOLLOW_LINKS) || !Files.isReadable(file)) {
                 throw new BusinessException("import.preview.fileUnreadable");
             }
             return file.toFile();
@@ -332,9 +332,9 @@ public class ImportFileStagingService implements IImportFileStagingService {
                 if (spec == null) {
                     throw new IllegalStateException("Non-terminal import task has no readable spec");
                 }
-                if (fileId.equals(spec.getImportFileId())
+                if (fileId.equalsIgnoreCase(spec.getImportFileId())
                         || (spec.getTableSources() != null && spec.getTableSources().stream()
-                        .anyMatch(source -> source != null && fileId.equals(source.getImportFileId())))) {
+                        .anyMatch(source -> source != null && fileId.equalsIgnoreCase(source.getImportFileId())))) {
                     return false;
                 }
             }

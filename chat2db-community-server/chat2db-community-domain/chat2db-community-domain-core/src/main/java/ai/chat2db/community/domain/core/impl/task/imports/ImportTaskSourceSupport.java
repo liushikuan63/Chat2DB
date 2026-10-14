@@ -75,6 +75,8 @@ public final class ImportTaskSourceSupport {
         return ImportTaskSpec.builder()
                 .taskType(parent.getTaskType())
                 .taskName(parent.getTaskName())
+                .recoveryIdentity(parent.getRecoveryIdentity())
+                .recoveryProtocol(parent.getRecoveryProtocol())
                 .target(TaskTargetSnapshot.builder()
                         .dataSourceId(parentTarget == null ? null : parentTarget.getDataSourceId())
                         .databaseName(source.getDatabaseName())

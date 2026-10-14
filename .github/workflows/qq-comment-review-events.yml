@@ -27,6 +27,7 @@ concurrency:
 jobs:
   collect:
     name: Collect sanitized QQ notification
+    if: github.repository == 'OtterMind/Chat2DB' || vars.ENABLE_QQ_NOTIFICATIONS == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:

@@ -58,6 +58,8 @@ class ImportTaskSubmissionServiceImplTest {
         ImportTaskSpec sameRequestAfterResolution = ImportTaskSpec.builder()
                 .clientSubmissionId("another-key-is-ignored")
                 .clientSubmissionFingerprint("server-field-is-ignored")
+                .recoveryIdentity("server-generated-recovery-id")
+                .recoveryProtocol("DATABASE_RECEIPTS_V1")
                 .taskType("DATA_FILE_IMPORT")
                 .importFileId("staged-users")
                 .sourceFile("D:/server/staging/staged-users.csv")

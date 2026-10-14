@@ -33,6 +33,7 @@ import ai.chat2db.community.domain.core.impl.task.imports.ImportColumnResolver;
 import ai.chat2db.community.domain.core.impl.task.imports.ImportFileProbe;
 import ai.chat2db.community.domain.core.impl.task.imports.ImportParallelAdmission;
 import ai.chat2db.community.domain.core.impl.task.imports.ImportTaskSourceSupport;
+import ai.chat2db.community.domain.core.impl.task.imports.ImportRecoveryIdentity;
 import ai.chat2db.community.domain.core.impl.task.imports.excel.ImportPreviewListener;
 import ai.chat2db.community.domain.core.impl.task.imports.reader.CsvImportReader;
 import ai.chat2db.community.domain.core.impl.task.imports.excel.CSVImporter;
@@ -142,7 +143,33 @@ public class TaskServiceImpl implements TaskService {
                 || spec.getTableSources() != null && !spec.getTableSources().isEmpty()) {
             ImportTaskSourceSupport.effectiveSources(spec);
         }
+        assignRecoveryIdentity(spec);
         return submit(spec);
+    }
+
+    private void assignRecoveryIdentity(ImportTaskSpec spec) {
+        spec.setRecoveryIdentity(null);
+        spec.setRecoveryProtocol(null);
+        if (!TaskType.DATA_FILE_IMPORT.name().equals(spec.getTaskType()) || !ImportRecoveryIdentity.eligible(spec)
+                || spec.getTarget() == null || StringUtils.isBlank(spec.getTarget().getTableName())) return;
+        spec.setRecoveryIdentity(java.util.UUID.randomUUID().toString());
+        spec.setRecoveryProtocol(ImportRecoveryIdentity.UNSUPPORTED);
+        ConnectInfo info = Chat2DBContext.getConnectInfo();
+        if (info == null || !Chat2DBContext.PLUGIN_MAP.containsKey(info.getDbType())) return;
+        var dialect = Chat2DBContext.getDbMetaData().importReceiptDialect();
+        if (dialect.isEmpty()) return;
+        var listener = new ai.chat2db.community.domain.api.service.db.ISqlExecutionStatementListener() {
+            public void onStatementCreated(java.sql.Statement statement) { }
+            public void onStatementClosed(java.sql.Statement statement) { }
+        };
+        try {
+            if (dialect.get().supportsTransactionalTarget(Chat2DBContext.getConnection(), info,
+                    spec.getTarget().getTableName(), listener)) {
+                spec.setRecoveryProtocol(ImportRecoveryIdentity.DATABASE);
+            }
+        } catch (java.sql.SQLException failure) {
+            throw new BusinessException("task.import.receiptAdmissionFailed", null, failure);
+        }
     }
 
     @Override

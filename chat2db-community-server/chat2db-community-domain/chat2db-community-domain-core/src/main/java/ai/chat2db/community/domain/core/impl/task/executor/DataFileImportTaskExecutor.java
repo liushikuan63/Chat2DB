@@ -54,7 +54,7 @@ public class DataFileImportTaskExecutor implements TaskExecutor<ImportTaskSpec> 
     @Override
     public void execute(ImportTaskSpec spec, TaskExecutionContext context) {
         ImportManifest manifest = null;
-        try {
+        try (var receiptConnection = ai.chat2db.community.domain.core.impl.task.imports.ImportReceiptConnectionScope.open(spec)) {
             boolean scopedManifest = ImportTaskSourceSupport.isMultiTable(spec);
             List<ImportTableSource> sources = ImportTaskSourceSupport.effectiveSources(spec);
             String format;

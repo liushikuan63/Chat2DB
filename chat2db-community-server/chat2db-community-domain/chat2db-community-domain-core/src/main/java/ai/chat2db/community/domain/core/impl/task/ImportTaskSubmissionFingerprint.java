@@ -23,6 +23,8 @@ final class ImportTaskSubmissionFingerprint {
         ImportTaskSpec canonical = JSON.parseObject(JSON.toJSONString(spec), ImportTaskSpec.class);
         canonical.setClientSubmissionId(null);
         canonical.setClientSubmissionFingerprint(null);
+        canonical.setRecoveryIdentity(null);
+        canonical.setRecoveryProtocol(null);
 
         String topLevelFileId = StringUtils.firstNonBlank(stagedFileId, canonical.getImportFileId());
         if (StringUtils.isNotBlank(topLevelFileId)) {

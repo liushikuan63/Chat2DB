@@ -63,6 +63,55 @@ import org.junit.jupiter.params.provider.EnumSource;
 
 class LocalTaskManagerTest {
 
+    @Test
+    void unknownReceiptCommitRetainsTaskSourceAndCheckpointForRecovery() throws Exception {
+        TestTaskStorage storage = new TestTaskStorage();
+        AtomicLong cleanup = new AtomicLong();
+        String identity = java.util.UUID.randomUUID().toString();
+        var spec = ai.chat2db.community.domain.api.model.task.ImportTaskSpec.builder()
+                .taskType("DATA_FILE_IMPORT").recoveryIdentity(identity)
+                .recoveryProtocol("DATABASE_RECEIPTS_V1").build();
+        TaskExecutor<ai.chat2db.community.domain.api.model.task.ImportTaskSpec> executor = new TaskExecutor<>() {
+            public String taskType() { return "DATA_FILE_IMPORT"; }
+            public Class<ai.chat2db.community.domain.api.model.task.ImportTaskSpec> specType() {
+                return ai.chat2db.community.domain.api.model.task.ImportTaskSpec.class;
+            }
+            public void execute(ai.chat2db.community.domain.api.model.task.ImportTaskSpec ignored, TaskExecutionContext context) {
+                context.checkpoint(ResumeState.builder().shardNo(0).kind("IMPORT_ROWS").rowsDone(0L)
+                        .cursorJson("{\"recoveryProtocol\":\"DATABASE_RECEIPTS_V1\",\"recoveryIdentity\":\"" + identity + "\"}").build());
+                throw new TaskExecutionException("IMPORT_COMMIT_OUTCOME_UNKNOWN", "Database receipt recovery required");
+            }
+            public void cleanupTerminalResources(ai.chat2db.community.domain.api.model.task.ImportTaskSpec ignored, Long id) {
+                cleanup.incrementAndGet();
+            }
+        };
+        taskManager = new LocalTaskManager(storage, new TaskExecutorRegistry(List.of(executor)), new ArtifactServiceImpl(),
+                new ConnectionContextConverter(), emptyExtensionManager(), 1, 4);
+        Task task = Task.builder().type("DATA_FILE_IMPORT").name("Unknown receipt commit").build();
+        taskManager.submit(task, event(TaskEventCode.TASK_CREATED.name()), spec, null, null);
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+        Task observed;
+        do {
+            observed = storage.get(task.getId()).orElseThrow();
+            if (TaskStatus.isTerminal(observed.getStatus()) || TaskStage.RESUMING.name().equals(observed.getStage())) break;
+            Thread.sleep(10);
+        } while (System.nanoTime() < deadline);
+        assertEquals(TaskStatus.PENDING.name(), observed.getStatus());
+        assertEquals(TaskStage.RESUMING.name(), observed.getStage());
+        assertEquals("IMPORT_COMMIT_OUTCOME_UNKNOWN", observed.getErrorCode());
+        assertEquals(1, storage.listResumeStates(task.getId()).size());
+        assertEquals(0L, cleanup.get());
+        assertEquals("RECOVERY_IN_PROGRESS", taskManager.control(task.getId()).getReason());
+        assertFalse(taskManager.cancel(task.getId()).isCancelSupported());
+        assertEquals(TaskStatus.PENDING.name(), storage.get(task.getId()).orElseThrow().getStatus());
+        taskManager.prepareForUserExit(null, null);
+        Task afterExit = storage.get(task.getId()).orElseThrow();
+        assertEquals(TaskStatus.PENDING.name(), afterExit.getStatus());
+        assertEquals("IMPORT_COMMIT_OUTCOME_UNKNOWN", afterExit.getErrorCode());
+        assertEquals(1, storage.listResumeStates(task.getId()).size());
+        assertEquals(0L, cleanup.get());
+    }
+
     private static final String CLIENT_SUBMISSION_RETENTION_HOURS = "chat2db.task.idempotency.retention-hours";
 
     @TempDir
@@ -785,6 +834,23 @@ class LocalTaskManagerTest {
         assertTrue(Files.exists(temporary));
         assertEquals(TaskEventCode.RESUME_AVAILABLE.name(),
                 storage.listEventsBefore(task.getId(), null, 1).get(0).getCode());
+    }
+
+    @Test
+    void legacyRowCheckpointCannotAuthorizeReplayOfUnknownCommittedRows() {
+        TestTaskStorage storage = new TestTaskStorage();
+        Task task = storage.create(newTask(), event(TaskEventCode.TASK_CREATED.name()));
+        task.setType("DATA_FILE_IMPORT");
+        task.setSpecJson(com.alibaba.fastjson2.JSON.toJSONString(ai.chat2db.community.domain.api.model.task.ImportTaskSpec.builder()
+                .taskType("DATA_FILE_IMPORT").format("CSV").mode("STANDARD").scope("TABLE").build()));
+        assertTrue(storage.compareAndSetStatus(task.getId(), "PENDING", "RUNNING",
+                TaskStatusPatch.builder().build(), event(TaskEventCode.TASK_STARTED.name())));
+        storage.saveResumeState(task.getId(), ResumeState.builder()
+                .shardNo(0).kind("IMPORT_ROWS").rowsDone(500L).build());
+        manager(storage, (spec, context) -> {}).reconcileInterruptedTasks();
+        Task result = storage.get(task.getId()).orElseThrow();
+        assertEquals("FAILED", result.getStatus());
+        assertEquals("IMPORT_LEGACY_RECOVERY_UNSAFE", result.getErrorCode());
     }
 
     @Test

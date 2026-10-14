@@ -27,7 +27,8 @@ public final class TaskLifecyclePolicy {
 
     public static boolean isLegalTransition(String source, String target, TaskStatusPatch patch) {
         if (TaskStatus.PENDING.name().equals(source)) {
-            return TaskStatus.RUNNING.name().equals(target) || TaskStatus.FAILED.name().equals(target);
+            return TaskStatus.RUNNING.name().equals(target) || TaskStatus.FAILED.name().equals(target)
+                    || TaskStatus.CANCELLED.name().equals(target);
         }
         if (TaskStatus.RUNNING.name().equals(source)) {
             return TaskStatus.SUCCESS.name().equals(target) || TaskStatus.FAILED.name().equals(target)
@@ -60,8 +61,13 @@ public final class TaskLifecyclePolicy {
             task.setStage(effectivePatch.getStage());
         }
         task.setProgressMessage(effectivePatch.getProgressMessage());
-        task.setErrorCode(TaskStatus.FAILED.name().equals(targetStatus) ? effectivePatch.getErrorCode() : null);
-        task.setErrorMessage(TaskStatus.FAILED.name().equals(targetStatus) ? effectivePatch.getErrorMessage() : null);
+        boolean receiptRecovery = TaskStatus.PENDING.name().equals(targetStatus)
+                && TaskStage.RESUMING.name().equals(effectivePatch.getStage())
+                && "DATA_FILE_IMPORT".equals(task.getType())
+                && "IMPORT_COMMIT_OUTCOME_UNKNOWN".equals(effectivePatch.getErrorCode());
+        boolean retainError = TaskStatus.FAILED.name().equals(targetStatus) || receiptRecovery;
+        task.setErrorCode(retainError ? effectivePatch.getErrorCode() : null);
+        task.setErrorMessage(retainError ? effectivePatch.getErrorMessage() : null);
         task.setArtifactId(TaskStatus.SUCCESS.name().equals(targetStatus)
                 ? primaryArtifactId(effectivePatch) : null);
         if (effectivePatch.getStartedAt() != null) {

@@ -48,6 +48,7 @@ final class TaskRunner<S extends TaskSpec> implements Runnable {
     private final ArtifactService artifactService;
 
     private final TaskExtensionManager taskExtensionManager;
+    private boolean interruptedAtCompletion;
 
     TaskRunner(TaskSubmission<S> submission, RunningTask runningTask, RunningTaskRegistry runningTaskRegistry,
             TaskStorage taskStorage, TaskExecutor<S> taskExecutor, ArtifactService artifactService,
@@ -65,6 +66,7 @@ final class TaskRunner<S extends TaskSpec> implements Runnable {
     public void run() {
         TaskExecutionContextImpl executionContext = new TaskExecutionContextImpl(
                 submission.taskId(), runningTask, taskStorage, artifactService);
+        interruptedAtCompletion = false;
         try {
             if (!startTask()) {
                 return;
@@ -81,6 +83,9 @@ final class TaskRunner<S extends TaskSpec> implements Runnable {
             logArtifactWritten(executionContext, drafts);
             completeSuccessfully(drafts);
         } catch (TaskCancelledException | CancellationException e) {
+            // FileChannel closes immediately on an interrupted thread. Cancellation has already
+            // been captured by the token; durable outcome/cleanup must run without that flag.
+            interruptedAtCompletion |= Thread.interrupted();
             if (runningTask.isCommitPhase()) {
                 completeFailed(TaskErrorCode.TASK_INTERNAL_ERROR.name(),
                         "Task execution failed after database commit started", null, e,
@@ -89,11 +94,14 @@ final class TaskRunner<S extends TaskSpec> implements Runnable {
                 completeCancelled(executionContext.artifactDrafts());
             }
         } catch (TaskExecutionException e) {
-            completeFailed(e.getCode(), e.publicMessage(), e.getSafeReason(), e,
+            interruptedAtCompletion |= Thread.interrupted();
+            if (canRecoverReceiptCommit(e)) completeReceiptRecoveryRequired(e);
+            else completeFailed(e.getCode(), e.publicMessage(), e.getSafeReason(), e,
                     executionContext.artifactDrafts());
         } catch (Throwable e) {
+            interruptedAtCompletion |= Thread.interrupted();
             if (!runningTask.isCommitPhase()
-                    && (runningTask.cancellationToken().isCancelled() || Thread.currentThread().isInterrupted())) {
+                    && (runningTask.cancellationToken().isCancelled() || interruptedAtCompletion)) {
                 if (!runningTask.shouldRetainResourcesForResume()) {
                     completeCancelled(executionContext.artifactDrafts());
                 }
@@ -102,6 +110,7 @@ final class TaskRunner<S extends TaskSpec> implements Runnable {
                         executionContext.artifactDrafts());
             }
         } finally {
+            boolean interruptedBeforeCleanup = Thread.interrupted();
             try {
                 cleanupTerminalResources();
                 executionContext.closeQuietly();
@@ -110,6 +119,7 @@ final class TaskRunner<S extends TaskSpec> implements Runnable {
                 unbindExecutionContext();
             } finally {
                 runningTask.markFinished();
+                if (interruptedAtCompletion || interruptedBeforeCleanup) Thread.currentThread().interrupt();
             }
         }
     }
@@ -132,6 +142,35 @@ final class TaskRunner<S extends TaskSpec> implements Runnable {
             }
             executionContext.logInfo(TaskEventCode.FILE_WRITE_COMPLETED.name(), "Export file written", details);
         }
+    }
+
+    private boolean canRecoverReceiptCommit(TaskExecutionException failure) {
+        if (!"IMPORT_COMMIT_OUTCOME_UNKNOWN".equals(failure.getCode())
+                || !(submission.spec() instanceof ai.chat2db.community.domain.api.model.task.ImportTaskSpec spec)
+                || !ai.chat2db.community.domain.core.impl.task.imports.ImportRecoveryIdentity.DATABASE.equals(spec.getRecoveryProtocol())) return false;
+        return taskStorage.listResumeStates(submission.taskId()).stream().anyMatch(state -> {
+            try {
+                var cursor = com.alibaba.fastjson2.JSON.parseObject(state.getCursorJson());
+                return cursor != null && spec.getRecoveryIdentity() != null
+                        && spec.getRecoveryIdentity().equals(cursor.getString("recoveryIdentity"))
+                        && spec.getRecoveryProtocol().equals(cursor.getString("recoveryProtocol"));
+            } catch (RuntimeException corrupt) { return false; }
+        });
+    }
+
+    private void completeReceiptRecoveryRequired(TaskExecutionException failure) {
+        runningTask.completionLock().lock();
+        try {
+            clearCompletionInterrupt();
+            // The driver could have committed before its reply was lost. Keep source/checkpoint
+            // until a fresh receipt claim resolves that outcome; never label it safely cancelled.
+            runningTask.retainResourcesForResume();
+            taskStorage.compareAndSetStatus(submission.taskId(), TaskStatus.RUNNING.name(), TaskStatus.PENDING.name(),
+                    TaskStatusPatch.builder().stage(TaskStage.RESUMING.name()).errorCode(failure.getCode())
+                            .errorMessage(failure.publicMessage()).progressMessage(failure.publicMessage())
+                            .updatedAt(new Date()).build(),
+                    lifecycleEvent(TaskEventCode.RESUME_AVAILABLE.name(), TaskEventLevel.WARN.name(), failure.publicMessage()));
+        } finally { runningTask.completionLock().unlock(); }
     }
 
     private boolean startTask() {
@@ -160,6 +199,7 @@ final class TaskRunner<S extends TaskSpec> implements Runnable {
         runningTask.completionLock().lock();
         List<String> published = new ArrayList<>();
         try {
+            clearCompletionInterrupt();
             if (runningTask.cancellationToken().isCancelled()) {
                 completeCancelledLocked(drafts);
                 return;
@@ -245,6 +285,7 @@ final class TaskRunner<S extends TaskSpec> implements Runnable {
 
     private void completeFailedLocked(String code, String message, String safeReason, Throwable cause,
             List<ArtifactDraft> drafts) {
+        clearCompletionInterrupt();
         FailureArtifacts diagnostics = publishFailureDiagnostics(drafts);
         log.error("Task {} failed", submission.taskId(), cause);
         Date now = new Date();
@@ -384,6 +425,7 @@ final class TaskRunner<S extends TaskSpec> implements Runnable {
     }
 
     private void completeCancelledLocked(List<ArtifactDraft> drafts) {
+        clearCompletionInterrupt();
         if (runningTask.shouldRetainResourcesForResume()) {
             return;
         }
@@ -408,6 +450,12 @@ final class TaskRunner<S extends TaskSpec> implements Runnable {
                 .message(message)
                 .details(Collections.emptyMap())
                 .build();
+    }
+
+    private void clearCompletionInterrupt() {
+        // The cancel token is set before Future.cancel(true). Wait for the completion lock first:
+        // an interrupt may arrive after the catch cleared it but before this lock was acquired.
+        interruptedAtCompletion |= Thread.interrupted();
     }
 
     private void bindExecutionContext() {

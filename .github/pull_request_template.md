@@ -16,6 +16,17 @@ Closes #
 
 <!-- Explain what changed, why it is needed, and any important design decision. -->
 
+<!-- Deliver complete behaviors. Include the caller, validation, implementation and required
+     transport/storage changes in the same PR. Each PR must work on main or on a previously
+     completed functional PR; do not depend on unpublished DTO/helper/directory layers. -->
+
+- Delivered functions and user-visible before/after behavior:
+- Runtime entrypoints and files that own each function:
+- Base/required completed PRs:
+- Core-to-edge delivery order and the complete behavior this PR adds:
+- Diff size: production +___/-___; tests/fixtures +___/-___; docs/config +___/-___.
+  Prefer a few hundred production lines. Explain larger changes when required for a complete function.
+
 ## Affected surfaces
 
 <!-- Check every surface affected by this PR. -->
@@ -37,6 +48,8 @@ For UI changes, attach before/after screenshots or a short recording.
 - Commands and results:
 - Manual verification:
 - UI evidence: N/A
+- Tested head SHA and evidence for each delivered function:
+- Remaining unrun platforms, providers or real workflows:
 
 ## Risk and compatibility
 

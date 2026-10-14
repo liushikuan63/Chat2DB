@@ -83,6 +83,7 @@ public class SQLImporter implements IImportStrategy {
 
     @Override
     public void run(ImportTaskSpec spec, TaskExecutionContext context) {
+        Connection borrowedScriptConnection = null;
         try {
             context.checkCancelled();
             File sourceFile = new File(spec.getSourceFile());
@@ -95,6 +96,13 @@ public class SQLImporter implements IImportStrategy {
                 exporterProfile = configuredExporterProfile(spec);
             } catch (IllegalArgumentException invalidProfile) {
                 throw invalidExport(invalidProfile);
+            }
+            if (exporterProfile == null) {
+                Connection connection = Chat2DBContext.getConnection();
+                // A script can open a server transaction without changing JDBC auto-commit.
+                // Failed task-owned scripts must discard this lease rather than return it dirty.
+                // An existing caller transaction keeps its caller's commit/rollback ownership.
+                if (connection.getAutoCommit()) borrowedScriptConnection = connection;
             }
             if (exporterProfile != null) {
                 boolean thirdParty = isThirdParty(spec);
@@ -168,12 +176,20 @@ public class SQLImporter implements IImportStrategy {
                 sqlExecutor.executeBatch(sqls);
                 context.logInfo(TaskEventCode.FILE_READ_COMPLETED.name(), "SQL file parsed");
             }
+            if (borrowedScriptConnection != null && context.taskId() != null) {
+                sqlExecutor.assertScriptCompleted();
+            }
         } catch (TaskCancelledException | TaskExecutionException e) {
+            if (borrowedScriptConnection != null) discardConnection(borrowedScriptConnection, e);
             throw e;
         } catch (Exception e) {
+            if (borrowedScriptConnection != null) discardConnection(borrowedScriptConnection, e);
             log.error("Could not import SQL file", e);
             throw new TaskExecutionException(TaskErrorCode.IMPORT_FAILED.name(),
                     "Could not import SQL file", e);
+        } catch (Error e) {
+            if (borrowedScriptConnection != null) discardConnection(borrowedScriptConnection, e);
+            throw e;
         }
     }
 

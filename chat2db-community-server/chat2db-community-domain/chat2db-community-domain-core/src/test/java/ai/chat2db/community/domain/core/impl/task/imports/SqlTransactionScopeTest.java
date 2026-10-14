@@ -11,6 +11,64 @@ import org.junit.jupiter.api.Test;
  * {@code BEGIN} ... {@code ROLLBACK} script (see the import path in {@link ImportSqlExecutor}).
  */
 class SqlTransactionScopeTest {
+    @Test
+    void proceduralBlocksDoNotChangeTheScriptTransactionScope() {
+        assertEquals(SqlTransactionScope.Effect.NONE, SqlTransactionScope.effectOf("BEGIN NULL; END;"));
+        assertEquals(SqlTransactionScope.Effect.NONE, SqlTransactionScope.effectOf("BEGIN TRY SELECT 1; END TRY"));
+        assertEquals(SqlTransactionScope.Effect.NONE, SqlTransactionScope.effectOf("END IF;"));
+        assertEquals(SqlTransactionScope.Effect.BEGIN, SqlTransactionScope.effectOf("BEGIN TRANSACTION named_transaction"));
+        assertEquals(SqlTransactionScope.Effect.BEGIN, SqlTransactionScope.effectOf("BEGIN ISOLATION LEVEL SERIALIZABLE READ ONLY"));
+    }
+
+    @Test
+    void productionOracleParserKeepsAnAnonymousBlockOutsideTransactionScope() {
+        var statements = new ai.chat2db.plugin.oracle.parser.OracleSqlParser()
+                .parserSqlScript("BEGIN\n NULL;\nEND;\n/\n");
+        assertEquals(1, statements.size());
+        assertEquals(SqlTransactionScope.Effect.NONE,
+                SqlTransactionScope.effectOf(statements.get(0).getSql()));
+    }
+
+    @Test
+    void savepointRollbackKeepsTheScriptTransactionOpen() {
+        SqlTransactionScope scope = new SqlTransactionScope();
+        scope.observe("BEGIN");
+        scope.observe("ROLLBACK TO SAVEPOINT saved");
+        assertTrue(scope.isOpen());
+        scope.observe("ROLLBACK WORK TO saved");
+        assertTrue(scope.isOpen());
+        scope.observe("ROLLBACK TRANSACTION TO SAVEPOINT saved");
+        assertTrue(scope.isOpen());
+    }
+
+    @Test
+    void chainedCommitAndRollbackKeepTheNextTransactionOpen() {
+        SqlTransactionScope scope = new SqlTransactionScope();
+        scope.observe("BEGIN");
+        scope.observe("COMMIT AND CHAIN");
+        assertTrue(scope.isOpen());
+        scope.observe("ROLLBACK WORK AND CHAIN");
+        assertTrue(scope.isOpen());
+        scope.observe("COMMIT AND NO CHAIN");
+        assertFalse(scope.isOpen());
+    }
+
+    @Test
+    void postgresEndAndAbortAliasesCloseTheCurrentTransaction() {
+        SqlTransactionScope scope = new SqlTransactionScope();
+        scope.observe("BEGIN");
+        scope.observe("END");
+        assertFalse(scope.isOpen());
+        scope.observe("BEGIN");
+        scope.observe("ABORT");
+        assertFalse(scope.isOpen());
+    }
+
+    @Test
+    void unrelatedStartCommandIsNotATransaction() {
+        assertEquals(SqlTransactionScope.Effect.NONE, SqlTransactionScope.effectOf("START REPLICA"));
+        assertEquals(SqlTransactionScope.Effect.BEGIN, SqlTransactionScope.effectOf("START TRANSACTION"));
+    }
 
     @Test
     void classifiesTransactionControlStatementsRegardlessOfCaseAndNoise() {

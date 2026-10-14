@@ -44,6 +44,11 @@ import static ai.chat2db.plugin.postgresql.constant.PostgreSQLMetaDataConstants.
 @Slf4j
 public class PostgreSQLMetaData extends DefaultMetaService implements IDbMetaData {
 
+    @Override
+    public Optional<ai.chat2db.spi.IImportReceiptDialect> importReceiptDialect() {
+        return Optional.of(new PostgreSQLImportReceiptDialect());
+    }
+
 
 
 

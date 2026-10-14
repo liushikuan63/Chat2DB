@@ -7,6 +7,11 @@ import ai.chat2db.community.domain.api.service.task.TaskExecutionContext;
 import ai.chat2db.community.domain.core.impl.task.imports.BaseImporter;
 import ai.chat2db.community.domain.core.impl.task.imports.ImportRowSqlBuilder;
 import ai.chat2db.community.domain.core.impl.task.imports.ImportSqlExecutor;
+import ai.chat2db.community.domain.core.impl.task.imports.ImportReceiptStore;
+import ai.chat2db.community.domain.core.impl.task.imports.ImportRecoveryIdentity;
+import ai.chat2db.community.domain.core.impl.task.imports.ImportColumnResolver;
+import ai.chat2db.community.domain.api.model.task.ResumeState;
+import com.alibaba.fastjson2.JSON;
 import ai.chat2db.community.domain.core.impl.task.imports.reader.ImportCell;
 import ai.chat2db.community.domain.core.impl.task.imports.reader.JsonImportReader;
 import ai.chat2db.community.tools.exception.ParamBusinessException;
@@ -36,7 +41,7 @@ public class JSONImporter extends BaseImporter {
         JsonOptions options = (spec.getJsonOptions() == null ? new JsonOptions() : spec.getJsonOptions()).validate();
         spec.setJsonOptions(options);
         ImportRowSqlBuilder builder = new ImportRowSqlBuilder(spec, columns);
-        ImportSqlExecutor executor = new ImportSqlExecutor(context);
+        ImportSqlExecutor executor = new ImportSqlExecutor(context, false);
         List<String> names = spec.getColumnMappings() == null
                 ? columns.stream().map(TableColumn::getName).toList()
                 : spec.getColumnMappings().stream().map(mapping -> mapping.getSourceColumn()).toList();
@@ -46,7 +51,16 @@ public class JSONImporter extends BaseImporter {
         }
         Map<String, Integer> targetIndexByName = targetIndexByName(header);
         builder.acceptHead(header);
+        ImportReceiptStore receipts = ImportRecoveryIdentity.open(spec,
+                ImportColumnResolver.resolveForSpec(columns, names, spec), context);
+        if (receipts != null) {
+            context.checkpoint(ResumeState.builder().shardNo(0).kind("IMPORT_JSON_DB_RECEIPTS").rowsDone(0L)
+                    .cursorJson(JSON.toJSONString(Map.of("recoveryProtocol", spec.getRecoveryProtocol(),
+                            "recoveryIdentity", spec.getRecoveryIdentity())))
+                    .updatedAt(new java.util.Date()).build());
+        }
         List<String> batch = new ArrayList<>(BATCH_SIZE);
+        List<Integer> rowNumbers = new ArrayList<>(BATCH_SIZE);
         JsonImportReader.read(new File(spec.getSourceFile()), options, Integer.MAX_VALUE,
                 (Map<String, ImportCell> record, Integer rowNumber) -> {
             requireUniqueKeys(record.keySet(), "row " + rowNumber);
@@ -59,12 +73,20 @@ public class JSONImporter extends BaseImporter {
                 }
             });
             batch.add(builder.buildCells(cells, rowNumber));
+            rowNumbers.add(rowNumber);
             if (batch.size() >= BATCH_SIZE) {
-                executor.executeBatch(batch);
+                executeBatch(executor, receipts, batch, rowNumbers);
                 batch.clear();
+                rowNumbers.clear();
             }
         }, context::checkCancelled);
-        executor.executeBatch(batch);
+        executeBatch(executor, receipts, batch, rowNumbers);
+    }
+
+    private static void executeBatch(ImportSqlExecutor executor, ImportReceiptStore receipts,
+            List<String> batch, List<Integer> rows) {
+        if (receipts == null) executor.executeBatch(batch);
+        else for (int index = 0; index < batch.size(); index++) receipts.execute(rows.get(index), batch.get(index));
     }
 
     /** Normalized target column name -> its position in the header the row builder works with. */

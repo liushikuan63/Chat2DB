@@ -105,6 +105,12 @@ public class LocalTaskManager {
                 .collect(Collectors.toSet());
         for (Task task : taskStorage.listTasksForRecovery()) {
             boolean resumable = resumableTaskIds.contains(task.getId());
+            if (resumable && hasUnsafeLegacyRowCheckpoint(task)) {
+                failPersistedTask(task, "IMPORT_LEGACY_RECOVERY_UNSAFE", TaskEventCode.TASK_FAILED.name(),
+                        "This older import has no database receipts; inspect its committed rows before starting a new import");
+                cleanupStoredTerminalResources(task);
+                continue;
+            }
             if (!TaskStatus.isTerminal(task.getStatus())) {
                 if (resumable) {
                     prepareResumableTask(task);
@@ -123,6 +129,17 @@ public class LocalTaskManager {
                         .filter(current -> TaskStatus.isTerminal(current.getStatus()))
                         .ifPresent(this::cleanupStoredTerminalResources);
             }
+        }
+    }
+
+    private boolean hasUnsafeLegacyRowCheckpoint(Task task) {
+        if (!TaskType.DATA_FILE_IMPORT.name().equals(task.getType()) || StringUtils.isBlank(task.getSpecJson())) return false;
+        try {
+            ImportTaskSpec spec = JSON.parseObject(task.getSpecJson(), ImportTaskSpec.class);
+            return ai.chat2db.community.domain.core.impl.task.imports.ImportRecoveryIdentity.eligible(spec)
+                    && !ai.chat2db.community.domain.core.impl.task.imports.ImportRecoveryIdentity.DATABASE.equals(spec.getRecoveryProtocol());
+        } catch (RuntimeException invalidSpec) {
+            return true;
         }
     }
 
@@ -291,6 +308,8 @@ public class LocalTaskManager {
         boolean requested = TaskStatus.CANCELLED.name().equals(task.getStatus())
                 || runningTask != null && runningTask.cancellationToken().isCancelled();
         String reason = terminal ? "TERMINAL"
+                : TaskStatus.PENDING.name().equals(task.getStatus()) && "IMPORT_COMMIT_OUTCOME_UNKNOWN".equals(task.getErrorCode())
+                    ? "RECOVERY_IN_PROGRESS"
                 : runningTask != null && runningTask.isCommitPhase() ? "COMMIT_IN_PROGRESS"
                 : runningTask != null && runningTask.shouldRetainResourcesForResume() ? "RECOVERY_IN_PROGRESS"
                 : requested ? "CANCELLATION_REQUESTED"
@@ -563,8 +582,11 @@ public class LocalTaskManager {
     }
 
     private boolean shouldPreserveForResume(String errorCode, Task task) {
-        return TaskErrorCode.APPLICATION_TERMINATED.name().equals(errorCode)
-                && task != null && !taskStorage.listResumeStates(task.getId()).isEmpty();
+        boolean unresolvedReceipt = task != null && TaskStatus.PENDING.name().equals(task.getStatus())
+                && TaskType.DATA_FILE_IMPORT.name().equals(task.getType())
+                && "IMPORT_COMMIT_OUTCOME_UNKNOWN".equals(task.getErrorCode());
+        return task != null && (TaskErrorCode.APPLICATION_TERMINATED.name().equals(errorCode) || unresolvedReceipt)
+                && !taskStorage.listResumeStates(task.getId()).isEmpty();
     }
 
     private void cleanupStoredTerminalResources(Task task) {

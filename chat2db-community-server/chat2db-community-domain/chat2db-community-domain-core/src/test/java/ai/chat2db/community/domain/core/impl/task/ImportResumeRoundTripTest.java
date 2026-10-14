@@ -44,8 +44,10 @@ import java.sql.Statement;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
+import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -175,6 +177,36 @@ class ImportResumeRoundTripTest {
         assertEquals(1, countIds(POISON_ID));
     }
 
+    @Test
+    void validJournalKeepsCommittedPrefixWhenCheckpointStorageCannotBeRead() throws Exception {
+        Path csv = writeCsv();
+        assertThrows(TaskExecutionException.class,
+                () -> new CSVImporter().run(csvSpec(csv, "FAIL_FAST"), contextFor()));
+        long committed = storage.resumeStates.stream().mapToLong(ResumeState::getRowsDone).max().orElseThrow();
+        assertTrue(committed > 100 && committed < ROWS);
+        TaskResumeJournal journal = TaskResumeJournal.openDirectory(TaskResumeJournal.directoryFor(1L),
+                Map.of("sourcePath", csv.toFile().getAbsolutePath(), "sourceLength", Files.size(csv),
+                        "sourceLastModified", Files.getLastModifiedTime(csv).toMillis()));
+        assertTrue(journal != null);
+        journal.progress("IMPORTING", committed);
+        storage.failResumeRead = true;
+
+        // Replaying from zero would reject over 100 previously committed IDs and fail this run.
+        assertDoesNotThrow(() -> new CSVImporter().run(csvSpec(csv, "SKIP"), contextFor()));
+        assertEquals(ROWS, countRows());
+        assertEquals(ROWS, countDistinctIds());
+    }
+
+    @Test
+    void unavailableCheckpointStoreWithoutValidJournalStopsBeforeWritingRows() throws Exception {
+        Path csv = writeCsv();
+        storage.failResumeRead = true;
+
+        assertThrows(TaskExecutionException.class,
+                () -> new CSVImporter().run(csvSpec(csv, "SKIP"), contextFor()));
+        assertEquals(1, countRows(), "only the original fixture row may exist when resume state is unknown");
+    }
+
     private Path writeCsv() throws Exception {
         Path csv = tempDirectory.resolve("resume.csv");
         StringBuilder content = new StringBuilder("ID,NAME\n");
@@ -236,6 +268,8 @@ class ImportResumeRoundTripTest {
 
     /** Task storage that records the resume states the batcher checkpoints. */
     private static final class RecordingStorage implements TaskStorage {
+
+        private boolean failResumeRead;
 
         private final List<Task> tasks = new ArrayList<>();
         private final List<TaskEvent> events = new ArrayList<>();
@@ -330,6 +364,10 @@ class ImportResumeRoundTripTest {
 
         @Override
         public List<ResumeState> listResumeStates(Long taskId) {
+            if (failResumeRead) {
+                failResumeRead = false;
+                throw new IllegalStateException("fixture checkpoint store unavailable");
+            }
             return List.copyOf(resumeStates);
         }
 
