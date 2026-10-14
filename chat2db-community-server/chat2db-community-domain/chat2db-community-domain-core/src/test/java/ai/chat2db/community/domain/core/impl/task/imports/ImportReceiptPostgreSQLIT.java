@@ -56,6 +56,17 @@ class ImportReceiptPostgreSQLIT {
         assertThrows(ImportReceiptStore.ReceiptSafetyException.class,()->ImportReceiptStore.open(dialect,info,"TARGET_ROWS",runKey,"b".repeat(64),context));
         assertEquals(2,countTarget());assertTrue(info.getConnection().getAutoCommit());
     }
+    @Test void receiptSchemaUnderscoresAreLiteralWhenMetadataFindsAnOwnedTable() throws Exception {
+        String sibling=schema.replace("receipt_", "receiptX");
+        try(var statement=keeper.createStatement()) {
+            statement.execute("CREATE SCHEMA \""+sibling+"\"");
+            var peer=new ai.chat2db.spi.IImportReceiptDialect.Location(keeper.getCatalog(),sibling,
+                    ai.chat2db.spi.IImportReceiptDialect.TABLE_NAME,"\""+sibling+"\".\""+ai.chat2db.spi.IImportReceiptDialect.TABLE_NAME+"\"");
+            statement.execute(dialect.createTableSql(peer));
+            try {assertTrue(open().execute(1,insert(1)));assertEquals(1,countTarget());}
+            finally {statement.execute("DROP SCHEMA \""+sibling+"\" CASCADE");}
+        }
+    }
     @Test void unloggedAndPartitionedTargetsCannotAdvertiseReceiptRecovery() throws Exception {
         try(var s=keeper.createStatement()) {
             s.execute("CREATE UNLOGGED TABLE \""+schema+"\".\"UNLOGGED_ROWS\" (ID INT)");

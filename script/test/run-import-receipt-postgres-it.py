@@ -1,4 +1,4 @@
-"""Run SQL script transactions on a newly owned PostgreSQL fixture; fail on missing/skipped reports."""
+"""Run import receipts on a newly owned PostgreSQL fixture; fail on missing/skipped reports."""
 import os
 from pathlib import Path
 import secrets
@@ -24,7 +24,7 @@ def docker(*args, env=None):
 def verify_report(path):
     suite = ET.parse(path).getroot()
     counts = {key: int(suite.attrib.get(key, 0)) for key in ("tests", "failures", "errors", "skipped")}
-    if suite.attrib.get("name") != SUITE or counts != {"tests": 4, "failures": 0, "errors": 0, "skipped": 0}:
+    if suite.attrib.get("name") != SUITE or counts != {"tests": 5, "failures": 0, "errors": 0, "skipped": 0}:
         raise RuntimeError("Invalid required PostgreSQL report: " + str(counts))
     return counts
 

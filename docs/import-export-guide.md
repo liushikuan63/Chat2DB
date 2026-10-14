@@ -172,7 +172,7 @@ File 任务存储取消时，中断标志可能使 FileChannel 无法落盘终�
 | --- | --- |
 | 完整 owning core/web 与依赖 package | 2368 测试，0 失败／错误／跳过；显式覆盖 Surefire include 和 failure-ignore 默认值 |
 | 真实 H2 回执与四格式 | Store9；CSV/JSON/XLS/XLSX4；CSV/XLSX SKIP2，包含转换拒绝和 SQL 约束拒绝，丢回复后重放保持相同拒绝行及原因 |
-| 真实 PostgreSQL16 回执 | 4 项无跳过：无键重放、未知 commit、REJECTED、UNLOGGED／分区及非持久回执拒绝；自有容器已清理 |
+| 真实 PostgreSQL16 回执 | 5 项无跳过：无键重放、未知 commit、REJECTED、UNLOGGED／分区及非持久回执拒绝、相邻 schema 同名回执表隔离；自有容器已清理 |
 | 默认 STANDARD、H2 任务存储、MySQL 无唯一键 | task1791940585713999，本地500／数据库706后强杀；原 ID 恢复到1500行，ID／备注／金额正确，各阶段提交重试同 ID，冲突键拒绝 |
 | 默认检查点频率、File 任务存储、MySQL 无唯一键 | task1791942298951999，本地0／数据库669后强杀，原 ID 恢复到精确1500行；终态清理源文件 |
 | 浏览器预览→映射→成功／下载 | 必填 KEY→ID 映射约束、真实任务、中文／emoji／字段内换行／小数及 CSV 下载逐值校验通过 |

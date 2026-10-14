@@ -196,11 +196,12 @@ public final class ImportReceiptStore {
 
     private static void validateSchema(Connection connection, IImportReceiptDialect.Location location) throws SQLException {
         String escape = connection.getMetaData().getSearchStringEscape();
-        String pattern = location.table().replace("_", escape + "_");
+        String schemaPattern = literalMetadataPattern(location.schema(), escape);
+        String pattern = literalMetadataPattern(location.table(), escape);
         List<String> names = new ArrayList<>();
         int[] types = {Types.CHAR, Types.BIGINT, Types.CHAR, Types.VARCHAR, Types.VARCHAR, Types.BIGINT, Types.INTEGER};
         String[] columns = {"run_key", "row_no", "payload_hash", "outcome", "reason", "created_at", "chat2db_owner_v1"};
-        try (ResultSet rows = connection.getMetaData().getColumns(location.catalog(), location.schema(), pattern, "%")) {
+        try (ResultSet rows = connection.getMetaData().getColumns(location.catalog(), schemaPattern, pattern, "%")) {
             while (rows.next()) {
                 int index = names.size();
                 String name = rows.getString("COLUMN_NAME").toLowerCase(Locale.ROOT);
@@ -220,6 +221,11 @@ public final class ImportReceiptStore {
         if (keys.size() != 2 || !keys.containsAll(List.of("run_key", "row_no"))) {
             throw unsafe("Owned receipt table primary key is incompatible", null);
         }
+    }
+
+    private static String literalMetadataPattern(String name, String escape) {
+        return name == null ? null : name.replace(escape, escape + escape)
+                .replace("_", escape + "_").replace("%", escape + "%");
     }
 
     private static boolean isUniqueViolation(SQLException failure) {
