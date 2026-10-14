@@ -145,3 +145,9 @@ SQL Server 插件提供同一连接的 `SELECT @@TRANCOUNT` 只读探针，覆�
 真实后端强杀／重启验证：STANDARD+SKIP 的任务1791933145770999 在已提交500行后中断，重启恢复为 PENDING/RESUMING，同一任务最终1500行且字段一致；各阶段重复提交均返回原ID，重复 resume 被拒绝。但默认 STANDARD/ABORT 在已提交622行、本地 checkpoint500时中断，恢复重放导致1062主键错误。仅本地 checkpoint 不能消除跨持久化提交窗口，不能将前一个成功推广为默认模式可靠恢复。用户已授权目标数据库工具管理回执表，回执与目标行同事务的修复及无唯一键验证正在进行，尚未完成验收。
 
 当前整合源码的浏览器上传→预览→KEY映射ID→导入结果和真实CSV下载已重新跑通：任务1791933196875999、导出1791933199157999，中文、emoji、字段内换行、小数逐字段一致。取消／响应丢失浏览器路径仍待后续阶段验证。
+
+### Unfinished task scripts and procedural blocks (2026-10-14)
+
+A task that borrowed an auto-commit connection must finish its script transaction and restore auto-commit before reporting success. An unfinished BEGIN or SET autocommit=0 script fails with IMPORT_SQL_TRANSACTION_OPEN and discards its borrowed connection; an initially caller-owned transaction retains its caller's decision. MySQL checks the actual session autocommit flag before insert batches, preserving SQL-controlled rollback even when JDBC caches a different flag. COMMIT alone does not restore a disabled MySQL session mode. The read-only probe has a five-second timeout and participates in task cancellation.
+
+BEGIN/END procedural blocks are distinct from transaction control: Oracle anonymous PL/SQL blocks and SQL Server TRY blocks do not alter the generic transaction tracker. The production Oracle parser has a focused contract regression; it is not a real Oracle engine run. Six real-H2 script cases, ten transaction/parser cases and three MySQL probe contracts pass without skips. Fresh isolated MySQL BEGIN and SET-autocommit EOF cases fail, leave zero target rows and no active fixture transaction; the Chinese task error is verified. Earlier committed chunks remain committed.
