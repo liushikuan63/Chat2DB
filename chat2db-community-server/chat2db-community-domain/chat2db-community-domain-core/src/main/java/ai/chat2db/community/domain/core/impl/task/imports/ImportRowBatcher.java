@@ -807,9 +807,9 @@ public final class ImportRowBatcher implements AutoCloseable {
      * stale checkpoint can never skip live rows.
      */
     private long resolveResumeBelowRow(ImportTaskSpec spec, TaskExecutionContext context) {
+        long below = 0L;
         try {
             File dir = TaskResumeJournal.directoryFor(context.taskId());
-            long below = 0L;
             for (TaskResumeJournal.Snapshot candidate : Stream
                     .of(TaskResumeJournal.recoverNewest(dir), TaskResumeJournal.recoverCommitted(dir),
                             TaskResumeJournal.recoverTail(dir))
@@ -818,6 +818,10 @@ public final class ImportRowBatcher implements AutoCloseable {
                     below = candidate.rowsDone();
                 }
             }
+        } catch (RuntimeException journalFailure) {
+            log.warn("Import journal recovery unavailable ({})", journalFailure.getClass().getSimpleName());
+        }
+        try {
             for (ResumeState state : context.resumeStates()) {
                 if (state == null || !RESUME_KIND_IMPORT.equals(state.getKind())
                         || state.getRowsDone() == null || state.getRowsDone() < 0) {
@@ -828,12 +832,15 @@ public final class ImportRowBatcher implements AutoCloseable {
                     below = state.getRowsDone();
                 }
             }
-            return below;
-        } catch (Throwable resumeProbeFailure) {
-            log.warn("Import resume probe failed; the import restarts from the first row",
-                    resumeProbeFailure);
-            return 0L;
+        } catch (RuntimeException checkpointFailure) {
+            if (below == 0L) {
+                throw new TaskExecutionException(TaskErrorCode.IMPORT_FAILED.name(),
+                        "Cannot determine a safe import resume position");
+            }
+            log.warn("Retaining verified import watermark {} after checkpoint lookup failed ({})",
+                    below, checkpointFailure.getClass().getSimpleName());
         }
+        return below;
     }
 
     private boolean identityMatches(Map<String, Object> stored) {

@@ -170,7 +170,7 @@ File 任务存储取消时，中断标志可能使 FileChannel 无法落盘终�
 
 | 路径 | 已运行结果 |
 | --- | --- |
-| 完整 owning core/web 与依赖 package | 2368 测试，0 失败／错误／跳过；显式覆盖 Surefire include 和 failure-ignore 默认值 |
+| 完整 owning core/web 与依赖 package | 追加 H2／旧 journal 兼容回归后的新基线2371测试，0失败／错误／跳过；显式覆盖 Surefire include 和 failure-ignore 默认值 |
 | 真实 H2 回执与四格式 | Store9；CSV/JSON/XLS/XLSX4；CSV/XLSX SKIP2，包含转换拒绝和 SQL 约束拒绝，丢回复后重放保持相同拒绝行及原因 |
 | 真实 PostgreSQL16 回执 | 5 项无跳过：无键重放、未知 commit、REJECTED、UNLOGGED／分区及非持久回执拒绝、相邻 schema 同名回执表隔离；自有容器已清理 |
 | 默认 STANDARD、H2 任务存储、MySQL 无唯一键 | task1791940585713999，本地500／数据库706后强杀；原 ID 恢复到1500行，ID／备注／金额正确，各阶段提交重试同 ID，冲突键拒绝 |
@@ -190,3 +190,11 @@ python -X utf8 script/test/run-import-receipt-postgres-it.py
 node script/test/import-task-browser-e2e.cjs
 node script/test/import-task-lifecycle-browser-e2e.cjs
 ```
+
+### H2 检查点与旧 journal 兼容修复
+
+任务存储自己的 H2 文件数据库使用 `WRITE_DELAY=0`，使已确认的 checkpoint 不依赖延迟日志刷盘。回归在隔离子 JVM 中保存 checkpoint 后立即 `halt(0)`，父进程重开数据库验证已保存水位；原实现读到0条，修复后读到1条、500行。该配置只作用于任务存储，沿用原数据库路径和事务边界，不修改导入目标库。H2 参数说明见[官方 WRITE_DELAY 文档](https://h2database.com/html/commands.html#set_write_delay)。本测试验证进程骤停后的恢复，不代表断电或磁盘硬件故障验收。
+
+旧／直接导入的 journal 恢复探测分别读取 journal 和任务存储。当 checkpoint 查询异常时，保留已通过源文件身份校验的正水位；没有这样的水位则以 `IMPORT_FAILED` 停止，避免静默从0写入。正常新任务在读取成功且没有检查点时仍从0开始。该兼容修复不能替代数据库回执对未知提交的判定，回执路径继续按原协议读取数据库证明。
+
+当前源码的两项首红已重现并修复：journal有效但checkpoint不可读时原实现产生101条重复拒绝；两处都无可读水位时原实现仍写目标。定向106项测试通过，包含真实H2/File存储、journal、并行回放及回执四格式/SKIP；并行生命周期夹具补齐正常 checkpoint 读写后，完整 owning package 新基线为2371项，0失败／错误／跳过。隔离QA旧基线2267不作为当前源码验收。

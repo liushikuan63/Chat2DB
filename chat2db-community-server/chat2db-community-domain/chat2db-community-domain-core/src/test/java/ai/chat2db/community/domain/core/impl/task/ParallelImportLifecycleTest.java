@@ -278,10 +278,18 @@ class ParallelImportLifecycleTest {
     private RunningTask task(long id) { return new RunningTask(id); }
 
     private void run(ImportTaskSpec spec, RunningTask task) {
+        var checkpoints = new java.util.concurrent.ConcurrentHashMap<Integer,
+                ai.chat2db.community.domain.api.model.task.ResumeState>();
         TaskStorage storage = (TaskStorage) Proxy.newProxyInstance(getClass().getClassLoader(), new Class<?>[]{TaskStorage.class},
                 (proxy, method, args) -> {
                     if (method.getName().equals("updateProgressIfRunning")) { progress.add((TaskProgress) args[1]); return true; }
                     if (method.getName().equals("appendEvent")) { events.add((TaskEvent) args[0]); return args[0]; }
+                    if (method.getName().equals("listResumeStates")) return List.copyOf(checkpoints.values());
+                    if (method.getName().equals("saveResumeState")) {
+                        var state = (ai.chat2db.community.domain.api.model.task.ResumeState) args[1];
+                        checkpoints.put(state.getShardNo(), state);
+                        return null;
+                    }
                     throw new UnsupportedOperationException(method.getName());
                 });
         new CSVImporter().run(spec, new TaskExecutionContextImpl(task.taskId(), task, storage, new ArtifactServiceImpl()));
