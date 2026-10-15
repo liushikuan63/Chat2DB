@@ -2,15 +2,16 @@ package ai.chat2db.community.web.api.converter.task;
 
 import ai.chat2db.community.domain.api.enums.ExportSizeEnum;
 import ai.chat2db.community.domain.api.enums.ExportScopeTypeEnum;
-import ai.chat2db.community.domain.api.model.task.CsvOptions;
 import ai.chat2db.community.domain.api.model.task.ExportTaskSpec;
+import ai.chat2db.community.domain.api.model.task.ImportScope;
+import ai.chat2db.community.domain.api.model.task.ImportTableSource;
 import ai.chat2db.community.domain.api.model.task.ImportTaskSpec;
 import ai.chat2db.community.domain.api.model.task.TaskFileFormat;
 import ai.chat2db.community.domain.api.model.task.TaskTargetSnapshot;
 import ai.chat2db.community.domain.api.model.task.TaskType;
-import ai.chat2db.community.tools.exception.BusinessException;
 import ai.chat2db.community.web.api.model.request.task.TaskExportRequest;
 import ai.chat2db.community.web.api.model.request.task.TaskImportRequest;
+import ai.chat2db.community.web.api.model.request.task.TaskImportTableSourceRequest;
 import org.apache.commons.collections4.CollectionUtils;
 import org.apache.commons.lang3.StringUtils;
 import org.springframework.stereotype.Component;
@@ -53,41 +54,96 @@ public class TaskWebConverter {
         String sourceFile = request.getSourceFile();
         String format = normalize(request.getFormat());
         String taskType = resolveImportTaskType(request.getTaskType(), format);
+        validateSqlSingleFileRequest(request, taskType);
+        String requestedScope = normalize(request.getScope());
+        String scope = requestedScope == null ? null : ImportScope.normalize(requestedScope);
+        String effectiveScope = ImportScope.normalize(scope);
+        List<ImportTableSource> tableSources = importTableSources(request, format);
+        String targetTable = StringUtils.defaultIfBlank(request.getTableName(),
+                tableSources.size() == 1 ? tableSources.get(0).getTableName() : null);
         return ImportTaskSpec.builder()
+                .clientSubmissionId(StringUtils.trimToNull(request.getClientSubmissionId()))
                 .taskType(taskType)
                 .taskName(StringUtils.defaultIfBlank(request.getTaskName(),
-                        defaultImportTaskName(taskType, request)))
+                        defaultImportTaskName(taskType, effectiveScope, request, tableSources)))
                 .target(target(request.getDataSourceId(), request.getDatabaseName(), request.getSchemaName(),
-                        request.getTableName()))
+                        targetTable))
+                .scope(scope)
+                .tableSources(tableSources)
+                .logicalDependencies(request.getLogicalDependencies())
+                .sourceKind(normalize(request.getSourceKind()))
+                .cycleStrategy(normalize(request.getCycleStrategy()))
+                .stagingPolicy(request.getStagingPolicy())
+                .validationOptions(request.getValidationOptions())
+                .finalizationOptions(request.getFinalizationOptions())
+                .rollbackOptions(request.getRollbackOptions())
+                .performanceSamplePercent(request.getPerformanceSamplePercent())
                 .sourceFile(sourceFile)
                 .importFileId(request.getFileId())
                 .displayFileName(StringUtils.defaultIfBlank(request.getDisplayFileName(), fileName(sourceFile)))
                 .format(format)
                 .dataTimeFormat(request.getDataTimeFormat())
-                .csvOptions(csvOptions(format, request.getCsvOptions()))
-                .excelOptions(("XLS".equals(format) || "XLSX".equals(format)) && request.getExcelOptions() != null
-                        ? request.getExcelOptions().validate() : null)
-                .jsonOptions("JSON".equals(format) && request.getJsonOptions() != null
-                        ? request.getJsonOptions().validate() : null)
-                .sqlImportOptions("SQL".equals(format) && request.getSqlImportOptions() != null
-                        ? request.getSqlImportOptions().validate() : null)
-                .mode(request.getMode())
+                .options(request.getOptions())
+                .unmappedTarget(request.getUnmappedTarget())
+                .mode(normalize(request.getMode()))
+                .confirmedNoStrongRelations(request.getConfirmedNoStrongRelations())
                 .build();
     }
 
-    private CsvOptions csvOptions(String format, CsvOptions csvOptions) {
-        if (!TaskFileFormat.CSV.name().equals(format)) {
-            return null;
+    private void validateSqlSingleFileRequest(TaskImportRequest request, String taskType) {
+        if (!TaskType.SQL_FILE_IMPORT.name().equals(taskType)) {
+            return;
         }
-        return (csvOptions == null ? CsvOptions.defaults() : csvOptions).validate();
+        if (CollectionUtils.isNotEmpty(request.getTableSources())
+                || CollectionUtils.isNotEmpty(request.getLogicalDependencies())
+                || StringUtils.isNotBlank(request.getCycleStrategy())
+                || request.getStagingPolicy() != null
+                || request.getValidationOptions() != null
+                || request.getFinalizationOptions() != null
+                || request.getRollbackOptions() != null
+                || request.getPerformanceSamplePercent() != null
+                || request.getConfirmedNoStrongRelations() != null) {
+            throw new IllegalArgumentException(
+                    "SQL file import does not accept multi-table manifest controls");
+        }
+    }
+
+    private List<ImportTableSource> importTableSources(TaskImportRequest request, String defaultFormat) {
+        if (CollectionUtils.isEmpty(request.getTableSources())) {
+            return List.of();
+        }
+        return request.getTableSources().stream().map(source -> importTableSource(request, source, defaultFormat))
+                .toList();
+    }
+
+    private ImportTableSource importTableSource(TaskImportRequest request, TaskImportTableSourceRequest source,
+            String defaultFormat) {
+        if (source == null) {
+            throw new IllegalArgumentException("Import table source cannot be null");
+        }
+        String sourceFile = source.getSourceFile();
+        return ImportTableSource.builder()
+                .databaseName(StringUtils.defaultIfBlank(source.getDatabaseName(), request.getDatabaseName()))
+                .schemaName(StringUtils.defaultIfBlank(source.getSchemaName(), request.getSchemaName()))
+                .tableName(source.getTableName())
+                .sourceFile(sourceFile)
+                .importFileId(source.getFileId())
+                .displayFileName(StringUtils.defaultIfBlank(source.getDisplayFileName(), fileName(sourceFile)))
+                .format(StringUtils.defaultIfBlank(normalize(source.getFormat()), defaultFormat))
+                .dataTimeFormat(StringUtils.defaultIfBlank(source.getDataTimeFormat(), request.getDataTimeFormat()))
+                .columnMappings(source.getColumnMappings())
+                .unmappedTarget(source.getUnmappedTarget() == null
+                        ? request.getUnmappedTarget() : source.getUnmappedTarget())
+                .options(source.getOptions() == null ? request.getOptions() : source.getOptions())
+                .build();
     }
 
     private String resolveExportTaskType(TaskExportRequest request) {
         if (StringUtils.isNotBlank(request.getTaskType())) {
-            TaskType taskType = taskType(request.getTaskType());
+            TaskType taskType = TaskType.valueOf(normalize(request.getTaskType()));
             if (taskType != TaskType.QUERY_RESULT_EXPORT && taskType != TaskType.SQL_EXPORT
                     && taskType != TaskType.TABLE_DATA_EXPORT) {
-                throw new BusinessException("task.type.invalid");
+                throw new IllegalArgumentException("Unsupported export task type: " + taskType);
             }
             return taskType.name();
         }
@@ -102,22 +158,14 @@ public class TaskWebConverter {
 
     private String resolveImportTaskType(String requestedTaskType, String format) {
         if (StringUtils.isNotBlank(requestedTaskType)) {
-            TaskType taskType = taskType(requestedTaskType);
+            TaskType taskType = TaskType.valueOf(normalize(requestedTaskType));
             if (taskType != TaskType.DATA_FILE_IMPORT && taskType != TaskType.SQL_FILE_IMPORT) {
-                throw new BusinessException("task.type.invalid");
+                throw new IllegalArgumentException("Unsupported import task type: " + taskType);
             }
             return taskType.name();
         }
         return TaskFileFormat.SQL.name().equals(format)
                 ? TaskType.SQL_FILE_IMPORT.name() : TaskType.DATA_FILE_IMPORT.name();
-    }
-
-    private TaskType taskType(String requested) {
-        try {
-            return TaskType.valueOf(normalize(requested));
-        } catch (IllegalArgumentException e) {
-            throw new BusinessException("task.type.invalid", null, e);
-        }
     }
 
     private TaskTargetSnapshot target(Long dataSourceId, String databaseName, String schemaName, String tableName) {
@@ -174,11 +222,16 @@ public class TaskWebConverter {
                 + (StringUtils.isBlank(displayFormat) ? "" : " as " + displayFormat);
     }
 
-    private String defaultImportTaskName(String taskType, TaskImportRequest request) {
+    private String defaultImportTaskName(String taskType, String scope, TaskImportRequest request,
+            List<ImportTableSource> tableSources) {
         String operation = TaskType.SQL_FILE_IMPORT.name().equals(taskType)
-                ? "Import SQL file" : "Import table data";
-        List<String> tableNames = StringUtils.isBlank(request.getTableName())
-                ? List.of() : List.of(request.getTableName());
+                ? "Import SQL file" : ImportScope.DATABASE.equals(scope)
+                ? "Import database data" : ImportScope.SCHEMA.equals(scope)
+                ? "Import schema data" : "Import table data";
+        List<String> tableNames = CollectionUtils.isNotEmpty(tableSources)
+                ? tableSources.stream().map(ImportTableSource::getTableName)
+                        .filter(StringUtils::isNotBlank).toList()
+                : StringUtils.isBlank(request.getTableName()) ? List.of() : List.of(request.getTableName());
         return operation + " - " + qualifiedTargetName(request.getDatabaseName(), request.getSchemaName(), tableNames);
     }
 
